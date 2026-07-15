@@ -35,6 +35,7 @@ def main():
     args = parse_args()
     mc = MODELS[args.model]
     tc = TRAININGS[args.training]
+    assert tc.batch_size % tc.grad_accum == 0
     training_name = args.training
     if args.no_rollout:
         tc = tc.model_copy(update={"rollout_loss": False})
@@ -127,11 +128,8 @@ def main():
         model.train()
         return tot / n
 
-    def train_step():
-        sb = train_starts[torch.randint(0, len(train_starts), (tc.batch_size,))]
+    def micro_step(sb):
         z, a = data.gather(cache, cond, sb, tc.T, tc.stride, device)
-        optim.zero_grad(set_to_none=True)
-
         zhat = predict(z, a)
         loss = F.smooth_l1_loss(zhat[:, :-1], z[:, 1:])
 
@@ -143,12 +141,21 @@ def main():
                 pred2 = functional_call(model, frozen, (s_in, a))
             zhat2 = s_in + pred2.float()
             loss = loss + F.smooth_l1_loss(zhat2[:, :-1], z[:, 1:])
+        return loss
 
-        loss.backward()
+    def train_step():
+        sb = train_starts[torch.randint(0, len(train_starts), (tc.batch_size,))]
+        optim.zero_grad(set_to_none=True)
+        micro = tc.batch_size // tc.grad_accum
+        loss_sum = 0.0
+        for i in range(tc.grad_accum):
+            loss = micro_step(sb[i * micro : (i + 1) * micro]) / tc.grad_accum
+            loss.backward()
+            loss_sum += loss.item()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), tc.grad_clip)
         optim.step()
         sched.step()
-        return loss.item(), float(grad_norm)
+        return loss_sum, float(grad_norm)
 
     model.train()
     t_start = time.monotonic()

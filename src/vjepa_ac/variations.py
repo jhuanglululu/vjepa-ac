@@ -24,6 +24,7 @@ class TrainingConfig(BaseModel):
     betas: tuple[float, float] = (0.9, 0.95)
     grad_clip: float = 1.0
     batch_size: int
+    grad_accum: int = 1
     T: int
     stride: int = 1
     warmup_steps: int
@@ -47,6 +48,7 @@ TRAININGS: dict[str, TrainingConfig] = {
     "full": TrainingConfig(
         lr=1e-4,
         batch_size=64,
+        grad_accum=8,
         T=16,
         warmup_steps=500,
         total_steps=5000,
@@ -58,6 +60,7 @@ TRAININGS: dict[str, TrainingConfig] = {
     "smoke": TrainingConfig(
         lr=1e-3,
         batch_size=8,
+        grad_accum=2,
         T=4,
         stride=2,
         warmup_steps=10,
