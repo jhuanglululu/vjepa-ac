@@ -1,7 +1,7 @@
 import json
 
 import torch
-from lerobot.datasets import LeRobotDataset
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from vjepa_ac import data
 

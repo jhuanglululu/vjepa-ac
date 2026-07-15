@@ -11,7 +11,7 @@ warnings.filterwarnings(
 
 import torch
 import torch.nn.functional as F
-from lerobot.datasets import LeRobotDataset
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from safetensors.torch import save_file
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
