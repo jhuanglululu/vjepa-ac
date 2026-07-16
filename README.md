@@ -41,10 +41,14 @@ uv run scripts/export.py --checkpoint checkpoints/base/full-s4/0/current.safeten
 uv run scripts/probe.py --target dstate                        # optional: raw latent diagnostics
 ```
 
-Run stride_gate.py before training: it trains a small per-stride probe to
-recover the exact conditioning features from latent pairs and prints the
-smallest stride whose held-out R2 clears the threshold — train at that
-stride. `--stride N` on train.py overrides the variation's stride and
+Run stride_gate.py before training: per stride it trains a 23M probe
+(per-patch MLP blocks with no cross-patch mixing, then multihead
+cross-attention with one learned query pooling the 256 patches into a single
+vector — so it can weight patches by how much motion information they carry
+— then MLP blocks and a projection out) to recover the exact conditioning
+features from latent pairs, tracks the best held-out R2 reached during
+training, and prints the smallest stride that clears the threshold — train
+at that stride. The verdict is on the motion dims (gripper excluded). `--stride N` on train.py overrides the variation's stride and
 records under `<training>-s<N>`; `--no-rollout` drops the two-pass rollout
 loss term and records under `<training>-noroll` (suffixes combine).
 evaluate.py reads the model and training config plus the conditioning stats
