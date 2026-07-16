@@ -22,6 +22,7 @@ def parse_args():
     p.add_argument("--model", choices=sorted(MODELS), required=True)
     p.add_argument("--training", choices=sorted(TRAININGS), required=True)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--stride", type=int, default=None)
     p.add_argument("--no-rollout", action="store_true")
     return p.parse_args()
 
@@ -37,6 +38,10 @@ def main():
     tc = TRAININGS[args.training]
     assert tc.batch_size % tc.grad_accum == 0
     training_name = args.training
+    if args.stride is not None and args.stride != tc.stride:
+        assert args.stride >= 1
+        tc = tc.model_copy(update={"stride": args.stride})
+        training_name += f"-s{args.stride}"
     if args.no_rollout:
         tc = tc.model_copy(update={"rollout_loss": False})
         training_name += "-noroll"

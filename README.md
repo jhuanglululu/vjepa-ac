@@ -24,27 +24,32 @@ Optional env vars (all paths, with defaults): `VJEPA_CACHE_DIR`
 (`./records`).
 
 Local machine can run: pytest, ruff/pyrefly, `--training smoke`, export.
-Remote box (GPU + cache) is needed for: prepare_cache, real training,
-evaluate, probe, check_actions.
+Remote box (GPU + cache) is needed for: prepare_cache, check_actions,
+stride_gate, real training, evaluate, probe.
 
 ## Usage
 
 ```
-uv run pytest                                                  # unit tests
-uv run scripts/train.py --model tiny --training smoke          # 50-step local sanity check
-uv run scripts/prepare_cache.py                                # remote: build latent cache
-uv run scripts/train.py --model base --training full --seed 0  # remote: real training
-uv run scripts/evaluate.py --checkpoint checkpoints/base/full/0/current.safetensors
-uv run scripts/export.py --checkpoint checkpoints/base/full/0/50.safetensors
-uv run scripts/probe.py --target dstate                        # remote: latent probes
-uv run scripts/check_actions.py                                # remote: action/state semantics
+uv run pytest                                                  # 1. local: unit tests
+uv run scripts/train.py --model tiny --training smoke          # 2. local: 50-step sanity check
+uv run scripts/prepare_cache.py                                # 3. remote: build latent cache
+uv run scripts/check_actions.py                                # 4. remote: confirm action/state semantics
+uv run scripts/stride_gate.py                                  # 5. remote: pick the training stride
+uv run scripts/train.py --model base --training full --stride 4 --seed 0   # 6. remote: real training
+uv run scripts/evaluate.py --checkpoint checkpoints/base/full-s4/0/current.safetensors  # 7.
+uv run scripts/export.py --checkpoint checkpoints/base/full-s4/0/current.safetensors    # 8. weights-only file
+uv run scripts/probe.py --target dstate                        # optional: raw latent diagnostics
 ```
 
-`--no-rollout` on train.py drops the two-pass rollout loss term; such runs
-record and checkpoint under `<training>-noroll`. evaluate.py reads the model
-and training config plus the conditioning stats from the checkpoint's JSON
-sidecar, so it takes only the checkpoint path; `--horizons` are counted in
-strided steps.
+Run stride_gate.py before training: it trains a small per-stride probe to
+recover the exact conditioning features from latent pairs and prints the
+smallest stride whose held-out R2 clears the threshold — train at that
+stride. `--stride N` on train.py overrides the variation's stride and
+records under `<training>-s<N>`; `--no-rollout` drops the two-pass rollout
+loss term and records under `<training>-noroll` (suffixes combine).
+evaluate.py reads the model and training config plus the conditioning stats
+from the checkpoint's JSON sidecar, so it takes only the checkpoint path;
+`--horizons` are counted in strided steps.
 
 Training resumes from `current.safetensors` automatically if one exists in the
 run's checkpoint directory; delete the directory to start fresh.
