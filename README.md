@@ -41,14 +41,21 @@ uv run scripts/export.py --checkpoint checkpoints/base/full-s4/0/current.safeten
 uv run scripts/probe.py --target dstate                        # optional: raw latent diagnostics
 ```
 
-Run stride_gate.py before training: per stride it trains a 23M probe
-(per-patch MLP blocks with no cross-patch mixing, then multihead
+Run stride_gate.py before training: per stride and seed it trains two 23M
+probes (per-patch MLP blocks with no cross-patch mixing, then multihead
 cross-attention with one learned query pooling the 256 patches into a single
-vector — so it can weight patches by how much motion information they carry
-— then MLP blocks and a projection out) to recover the exact conditioning
-features from latent pairs, tracks the best held-out R2 reached during
-training, and prints the smallest stride that clears the threshold — train
-at that stride. The verdict is on the motion dims (gripper excluded). `--stride N` on train.py overrides the variation's stride and
+vector, then MLP blocks and a projection out) — one on latent pairs
+(z_t, z_{t+s}) and one z0-only control with the second frame ablated — to
+recover the exact conditioning features. The decision statistic is the
+pair-minus-control margin on motion dims (gripper excluded): information
+redundant with z_t is useless as conditioning, so only the margin counts.
+Scores are reported with errors combining a bootstrap over test episodes and
+seed spread; checkpoints are selected on held-out episodes disjoint from the
+reported test episodes; a stride passes when pair R2 − SE clears --threshold
+and margin − SE clears --margin. Fails are split into conclusive (probe fit
+its training set) vs probe-limited (train R2 < 0.5, inconclusive), and the
+recommendation checks that training windows actually exist at T=16 for the
+chosen stride. `--stride N` on train.py overrides the variation's stride and
 records under `<training>-s<N>`; `--no-rollout` drops the two-pass rollout
 loss term and records under `<training>-noroll` (suffixes combine).
 evaluate.py reads the model and training config plus the conditioning stats
