@@ -49,7 +49,9 @@ def main():
             cam, cmd = queue.pop(0)
             gpu = idle.pop(0)
             log = f"records/diagnostics/stride_gate_{cam}.log"
-            env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
+            cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+            phys = cvd.split(",")[gpu] if cvd else str(gpu)
+            env = dict(os.environ, CUDA_VISIBLE_DEVICES=phys)
             proc = subprocess.Popen(cmd, env=env, stdout=open(log, "w"), stderr=subprocess.STDOUT)
             running[proc.pid] = (cam, gpu, proc, log)
             print(f"launched {cam} on gpu {gpu} (pid {proc.pid}) -> {log}")

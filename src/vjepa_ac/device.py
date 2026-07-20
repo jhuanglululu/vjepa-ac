@@ -1,6 +1,17 @@
+import os
 import subprocess
 
 import torch
+
+
+def map_visible(free: list[int], cvd: str | None) -> list[int]:
+    if cvd is None:
+        return free
+    try:
+        visible = [int(x) for x in cvd.split(",") if x.strip()]
+    except ValueError:
+        return []
+    return [visible.index(p) for p in free if p in visible]
 
 
 def pick_free_gpus(threshold_mb: int = 1000) -> list[int]:
@@ -20,7 +31,7 @@ def pick_free_gpus(threshold_mb: int = 1000) -> list[int]:
         idx, used = line.split(",")
         if int(used.strip()) < threshold_mb:
             free.append(int(idx.strip()))
-    return free
+    return map_visible(free, os.environ.get("CUDA_VISIBLE_DEVICES"))
 
 
 def get_device() -> str:
