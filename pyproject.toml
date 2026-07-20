@@ -14,7 +14,9 @@ dependencies = [
 [project.optional-dependencies]
 cache = [
     "transformers>=4.48",
-    "lerobot>=0.1",
+    "huggingface-hub>=0.24",
+    "pyarrow>=17",
+    "av>=12",
 ]
 
 [dependency-groups]
@@ -42,4 +44,4 @@ src = ["src", "scripts", "tests"]
 testpaths = ["tests"]
 
 [tool.pyrefly]
-replace-imports-with-any = ["lerobot.*", "transformers.*"]
+replace-imports-with-any = ["transformers.*", "av.*", "pyarrow.*", "huggingface_hub.*"]

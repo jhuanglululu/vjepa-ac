@@ -3,6 +3,7 @@ import json
 import math
 import os
 import statistics
+from typing import Any
 
 import torch
 from torch import nn
@@ -37,7 +38,8 @@ def parse_args():
     p.add_argument("--margin", type=float, default=0.1)
     p.add_argument("--no-preload", action="store_true")
     p.add_argument("--device", default=None)
-    p.add_argument("--out", default="records/diagnostics/stride_gate.json")
+    p.add_argument("--cache-dir", default=None)
+    p.add_argument("--out", default=None)
     return p.parse_args()
 
 
@@ -114,7 +116,9 @@ def main():
     args = parse_args()
     device = args.device or get_device()
 
-    cache = data.load_cache()
+    cache = data.load_cache(args.cache_dir)
+    camera = cache.meta.get("camera", "cache")
+    out_path = args.out or f"records/diagnostics/stride_gate_{camera}.json"
     latents = cache.latents
     N, P, D = latents.get_shape() if hasattr(latents, "get_shape") else latents.shape
     train_eps, val_eps = data.split_episodes(cache.episodes, args.val_frac)
@@ -128,7 +132,7 @@ def main():
                 raise
             print("latents do not fit on device, falling back to mmap gathers")
     print(
-        f"{len(train_eps)} train / {len(val_eps)} val episodes | "
+        f"camera: {camera} | {len(train_eps)} train / {len(val_eps)} val episodes | "
         f"target: normalized conditioning features (dim {cache.state_dim}) | "
         f"preloaded: {lat is not None} | device {device}"
     )
@@ -163,7 +167,7 @@ def main():
         )
 
     T_full = TRAININGS["full"].T
-    rows = []
+    rows: list[dict[str, Any]] = []
     for s in sorted(args.strides):
         train_idx = pair_starts(train_eps, s)
         sel_idx = pair_starts(sel_eps, s)
@@ -202,7 +206,7 @@ def main():
             )
             sched = make_scheduler(optim, args.warmup, args.steps)
             label = f"stride {s} seed {seed} {'z0-only' if ablate else 'pair'}"
-            best = None
+            best: Any = None
             for step in tqdm(range(1, args.steps + 1), desc=label, unit="step", leave=False):
                 bi = train_idx[torch.randint(0, len(train_idx), (args.batch_size,))]
                 z0 = gather_z(bi)
@@ -225,7 +229,7 @@ def main():
                     probe.train()
             return best
 
-        seed_rows = []
+        seed_rows: list[dict[str, Any]] = []
         for seed in range(args.seeds):
             pair = train_probe(seed, ablate=False)
             base = train_probe(seed, ablate=True)
@@ -350,10 +354,11 @@ def main():
                 "different lr before concluding anything"
             )
 
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as f:
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w") as f:
         json.dump(
             {
+                "camera": camera,
                 "threshold": args.threshold,
                 "margin": args.margin,
                 "val_frac": args.val_frac,
@@ -371,7 +376,7 @@ def main():
             f,
             indent=2,
         )
-    print(f"saved -> {args.out}")
+    print(f"saved -> {out_path}")
 
 
 if __name__ == "__main__":

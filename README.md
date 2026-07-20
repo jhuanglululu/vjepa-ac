@@ -3,14 +3,18 @@
 Learning-purpose reproduction of the V-JEPA 2-AC predictor from Meta's V-JEPA 2
 paper: a small block-causal transformer trained to predict the next frame's
 latents from past latents and executed motion, on top of a frozen
-`facebook/vjepa2-vitl-fpc64-256` encoder over `lerobot/droid_100`
-(wrist camera). Frames are sampled at a temporal stride so per-step latent
-change clears the encoder noise floor; the action token for each position is
-the wrap-corrected proprio-state delta over that strided interval (absolute
-value for the gripper dim), normalized with train-split stats that travel in
-the checkpoint sidecar. Frame latents are pre-encoded once into a cache;
-training touches only the cache, never the encoder. Torch-only: real runs happen on
-the remote L40S box, while tests and the smoke variation run locally on CPU.
+`facebook/vjepa2-vitl-fpc64-256` encoder over the first 100 episodes of
+`nvidia/Cosmos3-DROID` (success split, 640x360 @ 15 fps; the intentional bias
+toward one task family is deliberate — similar scenes make cross-episode
+generalization feasible at this data scale). The first `--trim` frames of each
+episode are dropped (the arm often starts outside the camera), and a cache is
+built per camera (`ext1`/`ext2`/`wrist` subdirs). Frames are sampled at a
+temporal stride so per-step latent change clears the encoder noise floor; the
+action token for each position is the wrap-corrected proprio-state delta over
+that strided interval (absolute value for the gripper dim), normalized with
+train-split stats that travel in the checkpoint sidecar. Training touches only
+the cache, never the encoder. Torch-only: real runs happen on the remote L40S
+box, while tests and the smoke variation run locally on CPU.
 
 ## Setup
 
@@ -25,21 +29,30 @@ Optional env vars (all paths, with defaults): `VJEPA_CACHE_DIR`
 
 Local machine can run: pytest, ruff/pyrefly, `--training smoke`, export.
 Remote box (GPU + cache) is needed for: prepare_cache, check_actions,
-stride_gate, real training, evaluate, probe.
+gate_sweep/stride_gate, real training, evaluate, probe.
 
 ## Usage
 
 ```
 uv run pytest                                                  # 1. local: unit tests
 uv run scripts/train.py --model tiny --training smoke          # 2. local: 50-step sanity check
-uv run scripts/prepare_cache.py                                # 3. remote: build latent cache
-uv run scripts/check_actions.py                                # 4. remote: confirm action/state semantics
-uv run scripts/stride_gate.py                                  # 5. remote: pick the training stride
-uv run scripts/train.py --model base --training full --stride 4 --seed 0   # 6. remote: real training
+uv run scripts/prepare_cache.py --episodes 100 --trim 15       # 3. remote: per-camera latent caches
+uv run scripts/check_actions.py --cache-dir latent_cache/wrist # 4. remote: confirm action/state semantics
+uv run scripts/gate_sweep.py --seeds 1                         # 5. remote: stride gate on every camera, one free GPU each
+uv run scripts/stride_gate.py --cache-dir latent_cache/wrist   # 5b. single-camera gate (full 3 seeds)
+VJEPA_CACHE_DIR=latent_cache/wrist \
+  uv run scripts/train.py --model base --training full --stride 4 --seed 0  # 6. remote: real training
 uv run scripts/evaluate.py --checkpoint checkpoints/base/full-s4/0/current.safetensors  # 7.
 uv run scripts/export.py --checkpoint checkpoints/base/full-s4/0/current.safetensors    # 8. weights-only file
 uv run scripts/probe.py --target dstate                        # optional: raw latent diagnostics
 ```
+
+prepare_cache.py downloads only the shards covering the requested episodes
+and writes one cache per camera under `latent_cache/<cam>/`; every consumer
+(train, evaluate, probe, check_actions, stride_gate) picks the camera via
+`--cache-dir` or the `VJEPA_CACHE_DIR` env var. gate_sweep.py launches one
+stride_gate per camera, each pinned to a free GPU (at most `--max-gpus 4`),
+and prints the combined verdict table when all finish.
 
 Run stride_gate.py before training: per stride and seed it trains two 23M
 probes (per-patch MLP blocks with no cross-patch mixing, then multihead
@@ -84,7 +97,7 @@ New variation = new entry there and a line here, in the same change.
 - `checkpoints/<model>/<training>/<seed>/` — `<step>.safetensors` (+ `<step>.json`
   sidecar), `current.*` for resume, 3 best by val loss kept, `model.safetensors`
   from export
-- `latent_cache/` — `latents.safetensors` + `cache.json` from prepare_cache
+- `latent_cache/<cam>/` — `latents.safetensors` + `cache.json` per camera from prepare_cache
 - `records/diagnostics/` — probe output
 
 ## Notes

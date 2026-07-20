@@ -1,19 +1,16 @@
+import argparse
 import copy
 import json
 import os
-import warnings
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-warnings.filterwarnings(
-    "ignore", message="The video decoding and encoding capabilities of torchvision"
-)
-
+import av
+import pyarrow.parquet as pq
 import torch
 import torch.nn.functional as F
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from huggingface_hub import hf_hub_download
 from safetensors.torch import save_file
-from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import AutoModel, AutoVideoProcessor
 
@@ -21,15 +18,115 @@ from vjepa_ac import data
 from vjepa_ac.device import get_device, pick_free_gpus
 from vjepa_ac.variations import TRAININGS
 
-free_gpus = pick_free_gpus()
-enc_devices = [f"cuda:{g}" for g in free_gpus[:4]] or [get_device()]
-NUM_WORKERS = min(64, os.cpu_count() or 8)
+FPS = 15
 DECODE_BATCH = 32
+STATE_COLS = ["observation.state.cartesian_position", "observation.state.gripper_position"]
+ACTION_COLS = ["action.cartesian_velocity", "action.gripper_position"]
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--episodes", type=int, default=100)
+    p.add_argument("--trim", type=int, default=15)
+    p.add_argument("--cameras", nargs="+", default=list(data.CAMERAS), choices=list(data.CAMERAS))
+    return p.parse_args()
+
+
+def hub_file(path):
+    return hf_hub_download(data.DATASET_ID, path, repo_type="dataset")
+
+
+def load_plan(n_episodes, trim):
+    meta = pq.read_table(hub_file(f"{data.DATASET_SPLIT}/meta/episodes/chunk-000/file-000.parquet"))
+    assert meta.num_rows >= n_episodes, f"meta shard has only {meta.num_rows} episodes"
+    meta = meta.slice(0, n_episodes).to_pydict()
+
+    plan, dropped = [], 0
+    for i in range(n_episodes):
+        length = meta["length"][i]
+        if length - trim < 2:
+            dropped += 1
+            continue
+        ep = {"episode": meta["episode_index"][i], "length": length, "videos": {}}
+        for short, key in data.CAMERAS.items():
+            ep["videos"][short] = {
+                "chunk": meta[f"videos/{key}/chunk_index"][i],
+                "file": meta[f"videos/{key}/file_index"][i],
+                "from_ts": meta[f"videos/{key}/from_timestamp"][i],
+            }
+        plan.append(ep)
+    return plan, dropped
+
+
+def load_rows(plan, trim):
+    shards = sorted({(e["chunk"], e["file"]) for e in _data_locations(plan)})
+    tables = [
+        pq.read_table(
+            hub_file(f"{data.DATASET_SPLIT}/data/chunk-{c:03d}/file-{f:03d}.parquet"),
+            columns=["episode_index", "frame_index"] + STATE_COLS + ACTION_COLS,
+        ).to_pydict()
+        for c, f in shards
+    ]
+    wanted = {e["episode"] for e in plan}
+    rows = {}
+    for t in tables:
+        for j in range(len(t["episode_index"])):
+            e = _scalar(t["episode_index"][j])
+            if e not in wanted:
+                continue
+            f = _scalar(t["frame_index"][j])
+            if f < trim:
+                continue
+            state = _vec(t[STATE_COLS[0]][j]) + _vec(t[STATE_COLS[1]][j])
+            action = _vec(t[ACTION_COLS[0]][j]) + _vec(t[ACTION_COLS[1]][j])
+            rows.setdefault(e, []).append((f, state, action))
+    for e in rows:
+        rows[e].sort()
+    return rows
+
+
+def _data_locations(plan):
+    meta = pq.read_table(
+        hub_file(f"{data.DATASET_SPLIT}/meta/episodes/chunk-000/file-000.parquet"),
+        columns=["episode_index", "data/chunk_index", "data/file_index"],
+    ).to_pydict()
+    wanted = {e["episode"] for e in plan}
+    return [
+        {"chunk": c, "file": f}
+        for e, c, f in zip(meta["episode_index"], meta["data/chunk_index"], meta["data/file_index"])
+        if e in wanted
+    ]
+
+
+def _scalar(v):
+    return int(v[0]) if hasattr(v, "__len__") else int(v)
+
+
+def _vec(v):
+    return [float(x) for x in v] if hasattr(v, "__len__") else [float(v)]
+
+
+def decode_segment(path, from_ts, n_frames, skip):
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        container.seek(int(from_ts / stream.time_base), stream=stream, backward=True)
+        got = 0
+        for frame in container.decode(stream):
+            if float(frame.pts * stream.time_base) < from_ts - 1 / (2 * FPS):
+                continue
+            got += 1
+            if got <= skip:
+                continue
+            yield torch.from_numpy(frame.to_ndarray(format="rgb24")).permute(2, 0, 1)
+            if got == n_frames:
+                return
+    raise AssertionError(f"{path}: expected {n_frames} frames from {from_ts}, got {got}")
 
 
 @torch.no_grad()
 def encode_batch(frames, enc, dev, mean, std):
-    x = frames.to(dev).float()
+    x = frames.to(dev).float() / 255
     if x.shape[-2:] != (data.IMG_SIZE, data.IMG_SIZE):
         x = F.interpolate(x, data.IMG_SIZE, mode="bilinear", align_corners=False, antialias=True)
     x = (x - mean) / std
@@ -112,24 +209,108 @@ def check_health(latents, actions, episodes, T, stride):
     return not warns
 
 
-if __name__ == "__main__":
-    os.makedirs(data.CACHE_DIR, exist_ok=True)
-    print(f"encoding on: {enc_devices} | decode workers: {NUM_WORKERS}")
+def build_camera_cache(short, plan, rows, trim, encoders, enc_devices, means, stds):
+    key = data.CAMERAS[short]
+    n_frames = sum(e["length"] - trim for e in plan)
+    videos = {
+        loc: hub_file(f"{data.DATASET_SPLIT}/videos/{key}/chunk-{loc[0]:03d}/file-{loc[1]:03d}.mp4")
+        for loc in sorted({(e["videos"][short]["chunk"], e["videos"][short]["file"]) for e in plan})
+    }
 
-    datasets = [LeRobotDataset(r, video_backend="pyav") for r in data.DATASET_IDS]
-    cams = [data.CAMERA_KEY or ds.meta.camera_keys[0] for ds in datasets]
-    dims = [ds[0]["action"].shape[-1] for ds in datasets]
-    sdims = [ds[0]["observation.state"].shape[-1] for ds in datasets]
-    for r, c, d in zip(data.DATASET_IDS, cams, dims):
-        print(
-            f"  {r}: camera_key={c} action_dim={d} frames={len(datasets[data.DATASET_IDS.index(r)])}"
+    latents = torch.empty(n_frames, 256, 1024, dtype=torch.float16)
+    actions = torch.empty(n_frames, 7, dtype=torch.float32)
+    states = torch.empty(n_frames, 7, dtype=torch.float32)
+    episodes = []
+    ng = len(enc_devices)
+    pools = [ThreadPoolExecutor(max_workers=1) for _ in enc_devices]
+    pending = deque()
+    pbar = tqdm(total=n_frames, desc=f"encoding {short}", unit="frame")
+
+    def encode_and_write(frames, offset, gi):
+        z = encode_batch(frames, encoders[gi], enc_devices[gi], means[gi], stds[gi])
+        latents[offset : offset + z.shape[0]] = z
+        pbar.update(z.shape[0])
+
+    off, gi = 0, 0
+    for ep in plan:
+        n_keep = ep["length"] - trim
+        ep_rows = rows[ep["episode"]]
+        assert len(ep_rows) == n_keep, (
+            f"episode {ep['episode']}: {len(ep_rows)} state rows != {n_keep} kept frames"
         )
-    assert len(set(cams)) == 1, f"camera key mismatch across datasets: {cams}"
-    assert len(set(dims)) == 1, f"action dim mismatch across datasets: {dims}"
-    assert len(set(sdims)) == 1, f"state dim mismatch across datasets: {sdims}"
-    cam, action_dim, state_dim = cams[0], dims[0], sdims[0]
-    n_frames = sum(len(ds) for ds in datasets)
-    print(f"camera_key={cam} action_dim={action_dim} frames={n_frames} datasets={len(datasets)}")
+        assert ep_rows[0][0] == trim and ep_rows[-1][0] == ep["length"] - 1
+        for i, (_, state, action) in enumerate(ep_rows):
+            states[off + i] = torch.tensor(state)
+            actions[off + i] = torch.tensor(action)
+        episodes.append([off, off + n_keep])
+
+        v = ep["videos"][short]
+        batch = []
+        for frame in decode_segment(
+            videos[(v["chunk"], v["file"])], v["from_ts"], ep["length"], trim
+        ):
+            batch.append(frame)
+            if len(batch) == DECODE_BATCH:
+                pending.append(
+                    pools[gi % ng].submit(encode_and_write, torch.stack(batch), off, gi % ng)
+                )
+                off += len(batch)
+                batch, gi = [], gi + 1
+                if len(pending) >= 2 * ng:
+                    pending.popleft().result()
+        if batch:
+            pending.append(
+                pools[gi % ng].submit(encode_and_write, torch.stack(batch), off, gi % ng)
+            )
+            off += len(batch)
+            gi += 1
+    for fut in pending:
+        fut.result()
+    for p in pools:
+        p.shutdown()
+    pbar.close()
+    assert off == n_frames
+
+    out_dir = os.path.join(data.CACHE_DIR, short)
+    os.makedirs(out_dir, exist_ok=True)
+    latents_path, meta_path = data.cache_paths(out_dir)
+    save_file({"latents": latents, "actions": actions, "state": states}, latents_path)
+    with open(meta_path, "w") as f:
+        json.dump(
+            {
+                "dataset": data.DATASET_ID,
+                "split": data.DATASET_SPLIT,
+                "camera": short,
+                "camera_key": key,
+                "trim": trim,
+                "action_dim": 7,
+                "state_dim": 7,
+                "n_frames": n_frames,
+                "episodes": episodes,
+                "episode_ids": [e["episode"] for e in plan],
+                "encoder": data.HF_REPO,
+                "img_size": data.IMG_SIZE,
+            },
+            f,
+        )
+    print(f"saved {n_frames} frame latents ({len(episodes)} episodes) -> {latents_path}")
+    tc = TRAININGS["full"]
+    return check_health(latents, actions, episodes, tc.T, tc.stride)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    free_gpus = pick_free_gpus()
+    enc_devices = [f"cuda:{g}" for g in free_gpus[:4]] or [get_device()]
+    print(f"encoding on: {enc_devices}")
+
+    plan, dropped = load_plan(args.episodes, args.trim)
+    print(
+        f"{data.DATASET_ID} [{data.DATASET_SPLIT}]: first {args.episodes} episodes, "
+        f"trim {args.trim} -> {len(plan)} kept, {dropped} dropped (too short), "
+        f"{sum(e['length'] - args.trim for e in plan)} frames per camera"
+    )
+    rows = load_rows(plan, args.trim)
 
     m = AutoModel.from_pretrained(data.HF_REPO)
     processor = AutoVideoProcessor.from_pretrained(data.HF_REPO)
@@ -139,85 +320,13 @@ if __name__ == "__main__":
     stds = [torch.tensor(processor.image_std, device=dev).view(1, 3, 1, 1) for dev in enc_devices]
     del m, base_enc
 
-    latents = torch.empty(n_frames, 256, 1024, dtype=torch.float16)
-    actions = torch.empty(n_frames, action_dim, dtype=torch.float32)
-    states = torch.empty(n_frames, state_dim, dtype=torch.float32)
-    episodes = []
-    off = 0
-    ng = len(enc_devices)
-    pbar = tqdm(total=n_frames, desc="encoding", unit="frame")
-
-    def collate(samples):
-        f = torch.stack([s[cam] for s in samples])
-        a = torch.stack([s["action"] for s in samples]).float()
-        st = torch.stack([s["observation.state"] for s in samples]).float()
-        return f, a, st
-
-    def encode_and_write(frames, acts, sts, offset, gi):
-        z = encode_batch(frames, encoders[gi], enc_devices[gi], means[gi], stds[gi])
-        b = z.shape[0]
-        latents[offset : offset + b] = z
-        actions[offset : offset + b] = acts
-        states[offset : offset + b] = sts
-        pbar.update(b)
-
-    pools = [ThreadPoolExecutor(max_workers=1) for _ in enc_devices]
-
-    for repo, ds in zip(data.DATASET_IDS, datasets):
-        base, L = off, len(ds)
-        ep = [int(e) for e in ds.hf_dataset["episode_index"]]
-        first, last = {}, {}
-        for i, e in enumerate(ep):
-            first.setdefault(e, i)
-            last[e] = i + 1
-        for e in first:
-            episodes.append([base + first[e], base + last[e]])
-
-        loader = DataLoader(
-            ds,
-            batch_size=DECODE_BATCH,
-            shuffle=False,
-            num_workers=NUM_WORKERS,
-            collate_fn=collate,
-            drop_last=False,
-            prefetch_factor=2 if NUM_WORKERS else None,
+    healthy = True
+    for short in args.cameras:
+        healthy &= build_camera_cache(
+            short, plan, rows, args.trim, encoders, enc_devices, means, stds
         )
-        local, gi, pending = base, 0, deque()
-        for frames, acts, sts in loader:
-            fut = pools[gi % ng].submit(encode_and_write, frames, acts, sts, local, gi % ng)
-            pending.append(fut)
-            local += frames.shape[0]
-            gi += 1
-            if len(pending) >= 2 * ng:
-                pending.popleft().result()
-        for fut in pending:
-            fut.result()
-        off += L
-
-    for p in pools:
-        p.shutdown()
-    pbar.close()
-
-    save_file({"latents": latents, "actions": actions, "state": states}, data.LATENTS_PATH)
-    with open(data.CACHE_META, "w") as fjs:
-        json.dump(
-            {
-                "datasets": data.DATASET_IDS,
-                "camera_key": cam,
-                "action_dim": action_dim,
-                "state_dim": state_dim,
-                "n_frames": n_frames,
-                "episodes": episodes,
-                "encoder": data.HF_REPO,
-                "img_size": data.IMG_SIZE,
-            },
-            fjs,
-        )
-    print(f"saved {n_frames} frame latents ({len(episodes)} episodes) -> {data.LATENTS_PATH}")
-    tc = TRAININGS["full"]
-    healthy = check_health(latents, actions, episodes, tc.T, tc.stride)
     print(
-        "now run: uv run scripts/train.py --model base --training full"
+        "now run: uv run scripts/gate_sweep.py"
         if healthy
-        else "fix the cache before training"
+        else "fix the cache before running the gate"
     )

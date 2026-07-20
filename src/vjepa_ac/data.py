@@ -10,14 +10,22 @@ from safetensors import safe_open
 from .variations import ModelConfig
 
 HF_REPO = "facebook/vjepa2-vitl-fpc64-256"
-DATASET_IDS = ["lerobot/droid_100"]
-CAMERA_KEY = "observation.images.wrist_image_left"
+DATASET_ID = "nvidia/Cosmos3-DROID"
+DATASET_SPLIT = "success"
+CAMERAS = {
+    "ext1": "observation.image.exterior_image_1_left",
+    "ext2": "observation.image.exterior_image_2_left",
+    "wrist": "observation.image.wrist_image_left",
+}
 IMG_SIZE = 256
 SPLIT_SEED = 0
 
 CACHE_DIR = os.environ.get("VJEPA_CACHE_DIR", "./latent_cache")
-LATENTS_PATH = os.path.join(CACHE_DIR, "latents.safetensors")
-CACHE_META = os.path.join(CACHE_DIR, "cache.json")
+
+
+def cache_paths(cache_dir: str | None = None) -> tuple[str, str]:
+    d = cache_dir or CACHE_DIR
+    return os.path.join(d, "latents.safetensors"), os.path.join(d, "cache.json")
 
 
 @dataclass
@@ -31,15 +39,16 @@ class LatentCache:
     meta: dict = field(default_factory=dict)
 
 
-def load_cache() -> LatentCache:
-    assert os.path.exists(LATENTS_PATH), (
-        f"no latent cache at {LATENTS_PATH} -- run scripts/prepare_cache.py first"
+def load_cache(cache_dir: str | None = None) -> LatentCache:
+    latents_path, meta_path = cache_paths(cache_dir)
+    assert os.path.exists(latents_path), (
+        f"no latent cache at {latents_path} -- run scripts/prepare_cache.py first"
     )
-    with open(CACHE_META) as f:
+    with open(meta_path) as f:
         meta = json.load(f)
-    cache = safe_open(LATENTS_PATH, framework="pt", device="cpu")
+    cache = safe_open(latents_path, framework="pt", device="cpu")
     assert "state" in cache.keys(), (
-        f"cache at {LATENTS_PATH} has no states -- rebuild with scripts/prepare_cache.py"
+        f"cache at {latents_path} has no states -- rebuild with scripts/prepare_cache.py"
     )
     return LatentCache(
         latents=cache.get_slice("latents"),

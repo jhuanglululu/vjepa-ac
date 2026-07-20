@@ -1,25 +1,30 @@
-import json
+import argparse
+import math
 
 import torch
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from vjepa_ac import data
 
-assert len(data.DATASET_IDS) == 1, "state dump assumes a single dataset in cache order"
-ds = LeRobotDataset(data.DATASET_IDS[0], video_backend="pyav")
-print("action feature:")
-print(json.dumps(ds.meta.features.get("action"), indent=2, default=str))
+p = argparse.ArgumentParser()
+p.add_argument("--cache-dir", default=None)
+args = p.parse_args()
 
-hf = ds.hf_dataset
-A = torch.stack([torch.as_tensor(x) for x in hf["action"]]).float()
-S = torch.stack([torch.as_tensor(x) for x in hf["observation.state"]]).float()
-ep = torch.tensor([int(e) for e in hf["episode_index"]])
+cache = data.load_cache(args.cache_dir)
+print(
+    f"dataset {cache.meta.get('dataset')} [{cache.meta.get('split')}] | "
+    f"camera {cache.meta.get('camera')} | trim {cache.meta.get('trim')} | "
+    f"{len(cache.episodes)} episodes"
+)
 
-m = ep[:-1] == ep[1:]
-a = A[:-1][m]
-s0 = S[:-1][m]
-dS = S[1:][m] - s0
-print(f"\n{len(a)} within-episode transitions")
+A, S = cache.actions, cache.states
+mask = torch.zeros(len(S) - 1, dtype=torch.bool)
+for a, b in cache.episodes:
+    mask[a : b - 1] = True
+a = A[:-1][mask]
+s0 = S[:-1][mask]
+dS = S[1:][mask] - s0
+dS = torch.remainder(dS + math.pi, 2 * math.pi) - math.pi
+print(f"{len(a)} within-episode transitions (wrap-corrected dS)")
 
 
 def diagcorr(x, y):
@@ -40,17 +45,16 @@ def fit_r2(x, y):
 
 
 c_vel = diagcorr(a, dS)
-c_tgt = diagcorr(a - s0, dS)
 c_abs = diagcorr(a, s0)
 
 print(
-    f"\n{'dim':>3} | {'act std':>8} | {'dS std':>8} | {'corr(a,dS)':>10} | "
-    f"{'corr(a-s,dS)':>12} | {'corr(a,s)':>9}"
+    f"\n{'dim':>3} | {'act std':>8} | {'dS std':>8} | {'state std':>9} | "
+    f"{'corr(a,dS)':>10} | {'corr(a,s)':>9}"
 )
 for d in range(a.shape[1]):
     print(
-        f"{d:>3} | {a[:, d].std():>8.4f} | {dS[:, d].std():>8.5f} | "
-        f"{c_vel[d]:>+10.3f} | {c_tgt[d]:>+12.3f} | {c_abs[d]:>+9.3f}"
+        f"{d:>3} | {a[:, d].std():>8.4f} | {dS[:, d].std():>8.5f} | {s0[:, d].std():>9.4f} | "
+        f"{c_vel[d]:>+10.3f} | {c_abs[d]:>+9.3f}"
     )
 
 print(
@@ -59,15 +63,9 @@ print(
 )
 
 print("""
-how to read:
-  corr(a,dS) ~ +1 per dim -> actions are joint velocities/deltas; summing them
-    across a stride (as the probe does) is correct
-  corr(a-s,dS) ~ +1 and corr(a,s) ~ +1 -> actions are absolute joint targets;
-    the usable motion signal is (a - s) or dS itself, not a
-  per-dim corrs low but fit R2 from [a, s] >> from s alone -> actions live in a
-    different frame (e.g. cartesian velocity); dS still recovers the motion
-  everything low -> commands barely correlate with executed motion at 15 Hz;
-    aggregate over a coarser stride
-training conditions on wrap-corrected dS for all dims except the last, which is
-taken as absolute -- confirm the last state dim is the gripper and the joint
-dims behave like wrapped angles before launching a run""")
+expected for Cosmos3-DROID: state dims 0-5 are cartesian_position [x,y,z,rx,ry,rz]
+(rx/ry/rz wrap at +-pi, so dS std should be small after wrap correction), dim 6 is
+gripper_position in [0,1]; action dims 0-5 are cartesian_velocity (corr(a,dS) should
+be clearly positive) and dim 6 the commanded gripper position (corr(a,s) ~ +1).
+Conditioning uses wrap-corrected dS on dims 0-5 and the absolute value on dim 6 --
+confirm those two patterns hold before training""")
