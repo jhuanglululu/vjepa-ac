@@ -18,6 +18,18 @@ def parse_args():
     return p.parse_args()
 
 
+def tail_status(log):
+    try:
+        size = os.path.getsize(log)
+        with open(log, "rb") as f:
+            f.seek(max(0, size - 4096))
+            text = f.read().decode(errors="replace")
+    except OSError:
+        return "no output yet"
+    parts = [seg.strip() for line in text.splitlines() for seg in line.split("\r") if seg.strip()]
+    return parts[-1][:110] if parts else "no output yet"
+
+
 def main():
     args = parse_args()
     gpus = pick_free_gpus()[: args.max_gpus]
@@ -44,6 +56,7 @@ def main():
 
     os.makedirs("records/diagnostics", exist_ok=True)
     running, queue, idle = {}, list(jobs), list(gpus)
+    last_status = time.monotonic()
     while queue or running:
         while queue and idle:
             cam, cmd = queue.pop(0)
@@ -51,11 +64,15 @@ def main():
             log = f"records/diagnostics/stride_gate_{cam}.log"
             cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
             phys = cvd.split(",")[gpu] if cvd else str(gpu)
-            env = dict(os.environ, CUDA_VISIBLE_DEVICES=phys)
+            env = dict(os.environ, CUDA_VISIBLE_DEVICES=phys, PYTHONUNBUFFERED="1")
             proc = subprocess.Popen(cmd, env=env, stdout=open(log, "w"), stderr=subprocess.STDOUT)
             running[proc.pid] = (cam, gpu, proc, log)
             print(f"launched {cam} on gpu {gpu} (pid {proc.pid}) -> {log}")
         time.sleep(5)
+        if running and time.monotonic() - last_status >= 30:
+            last_status = time.monotonic()
+            for cam, gpu, proc, log in running.values():
+                print(f"  [{cam} gpu{gpu}] {tail_status(log)}", flush=True)
         for pid in list(running):
             cam, gpu, proc, log = running[pid]
             if proc.poll() is None:
