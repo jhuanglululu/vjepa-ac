@@ -1,20 +1,101 @@
 # vjepa-ac
 
-Learning-purpose reproduction of the V-JEPA 2-AC predictor from Meta's V-JEPA 2
-paper: a small block-causal transformer trained to predict the next frame's
-latents from past latents and executed motion, on top of a frozen
-`facebook/vjepa2-vitl-fpc64-256` encoder over the first 100 episodes of
-`nvidia/Cosmos3-DROID` (success split, 640x360 @ 15 fps; the intentional bias
-toward one task family is deliberate — similar scenes make cross-episode
-generalization feasible at this data scale). The first `--trim` frames of each
-episode are dropped (the arm often starts outside the camera), and a cache is
-built per camera (`ext1`/`ext2`/`wrist` subdirs). Frames are sampled at a
-temporal stride so per-step latent change clears the encoder noise floor; the
-action token for each position is the wrap-corrected proprio-state delta over
-that strided interval (absolute value for the gripper dim), normalized with
-train-split stats that travel in the checkpoint sidecar. Training touches only
-the cache, never the encoder. Torch-only: real runs happen on the remote L40S
-box, while tests and the smoke variation run locally on CPU.
+Learning-purpose reproduction of the V-JEPA 2-AC action-conditioned world
+model from Meta's V-JEPA 2 paper, scaled down to what 100 robot episodes and
+a handful of GPU-hours can support: a frozen V-JEPA encoder, a small
+transformer predictor conditioned on executed motion, and goal-image MPC
+planning with CEM. The interesting part is what the downscaling forced — the
+model predicts in a learned, motion-weighted 16-token space instead of raw
+patch latents, a deviation each step of which was motivated by a measurement
+(see below). Data: first 100 episodes of `nvidia/Cosmos3-DROID` (success
+split, one task family by intent — similar scenes make cross-episode
+generalization feasible at this scale). Real runs happen on a remote GPU box;
+tests and the smoke variation run locally on CPU.
+
+## How and why this differs from Facebook's
+
+V-JEPA 2-AC trains a ~300M block-causal predictor to output the **full patch
+latents** of the next frame, on ~62 hours of DROID, over a frozen ViT-g
+encoder. At that scale the model can afford to learn action-x-content
+interactions from raw latents. We have ~45 minutes of robot data and a
+ViT-L/256 encoder, and the direct reproduction failed in a specific,
+measurable way:
+
+- Raw-latent training was **action-blind**: shuffling actions at eval cost
+  +0.2%, zero-actions matched the model, and rollouts never left the input
+  frame (retrieval offset exactly -h*stride). The rollout loss did not help.
+- Yet the information exists: a 23M probe decodes motion from latent pairs
+  at R2 ~0.37 (stride_gate), so the failure is not the encoder.
+- The reverse direction is the killer: ridge regression from actions to raw
+  latent deltas explains **0.00%** of their energy (ceiling_probe). There is
+  no scene-independent "moving right" direction in V-JEPA latent space —
+  action use must go through content-dependent interactions, and ~99.9% of
+  the training loss is content/noise the actions can never explain. An
+  overfit A/B test showed the action pathway opening at a crawl (0.7 -> 5%
+  sensitivity over 3000 steps on a memorized subset) — an optimization
+  problem our data budget cannot buy out of.
+
+The fix is to change the objective rather than the scale: **learn a small
+token space where motion is a first-class share of the variance, and predict
+there.** A frozen-then-fine-tuned compressor (16 cross-attention queries,
+trained on inverse dynamics + light reconstruction) defines the space; the
+predictor trains entirely in it. Same paper recipe otherwise — frozen
+encoder, block-causal predictor, Δstate conditioning, CEM planning — but the
+prediction target is 16x384 tokens instead of 256x1024 latents. Result:
+shuffled-actions +50-65% worse at h=15 (vs +0.2% raw), model/copy 0.67-0.73,
+rollouts that track the true trajectory. Secondary deviations, all
+measurement-driven: frames sampled at temporal stride 6 (per-step motion at
+15 Hz sits below the encoder noise floor; probed in stride_gate), and
+conditioning on wrap-corrected **executed** Δstate rather than commanded
+actions.
+
+## Architecture
+
+Frozen encoder -> compressor -> block-causal predictor, ~24M trained params:
+
+- **Encoder** (frozen, cache-time only): `facebook/vjepa2-vitl-fpc64-256`
+  maps each 256x256 frame to 256 patches x 1024 dims. Frames are encoded
+  once into the latent cache; training never touches the encoder.
+- **Compressor C** (~7M): linear 1024->384 + per-patch MLP block, then 16
+  learned queries cross-attend over the 256 patches (8 heads), then a
+  per-token MLP block -> 16 tokens x 384 dims per frame, standardized with
+  train-split stats stored as model buffers. An **inverse-dynamics head**
+  (train-time only) predicts the conditioning features from consecutive
+  token pairs — it is what forces motion into the tokens.
+- **Predictor** (~17M): block-causal transformer (d_model 512, 6 layers, 16
+  heads, RoPE, SiLU MLPs). Each frame contributes its 16 tokens plus one
+  action token (a linear embedding of the 7-dim conditioning), so a T=16
+  window is a 272-token sequence; the block-causal mask lets frame t's
+  positions see all frames <= t including t's action token. The output head
+  predicts residual token deltas: z_{t+1} = z_t + f(z_<=t, a_<=t).
+- **Conditioning**: per strided interval, wrap-corrected proprio Δstate on
+  dims 0-5 summed over the interval, absolute gripper on dim 6, normalized
+  with train-episode stats that travel in the checkpoint sidecar.
+
+## Training process
+
+Two phases, gated so GPU time is only spent downstream of a positive
+measurement:
+
+1. **Compressor first** (`train_compressor.py`, ~minutes): train C + the ID
+   head on stride-6 latent pairs — loss = inverse dynamics MSE + 0.1 x
+   reconstruction (a throwaway cross-attention decoder regressing the input
+   patches, which keeps enough static context in the tokens for forecasting).
+   Best checkpoint by held-out ID motion R2. Two gates must pass before
+   phase 2: ID R2 >= 0.2, and a C-space ridge ceiling >= +2% (the analogue
+   of the raw-space 0.00% measurement).
+2. **Predictor second** (`train.py`, ~30 min for 10k steps): the phase-1
+   compressor is loaded and fine-tunes with the predictor at a much smaller
+   lr (`compressor_lr`, ~lr/10). Loss = teacher-forced smooth-L1 on next
+   tokens + a two-pass rollout term (predictions fed back once) + the ID
+   auxiliary. Unfreezing the compressor reopens the collapse pathway, so
+   three guards hold it: prediction targets are stop-grad, the ID auxiliary
+   keeps motion linearly readable from the tokens, and a collapse monitor
+   logs val token std + ID loss every val interval. Both modules ship in one
+   checkpoint.
+
+Training is window-based: T=16 frames at stride 6 (91-frame span), episode-
+level train/val split shared by every script, batch 64 with grad accumulation.
 
 ## Setup
 
@@ -26,11 +107,6 @@ uv sync --extra cache   # remote: adds transformers/pyarrow/av/pillow for cache 
 Optional env vars (all paths, with defaults): `VJEPA_CACHE_DIR`
 (`./latent_cache`), `VJEPA_CKPT_DIR` (`./checkpoints`), `VJEPA_RECORDS_DIR`
 (`./records`).
-
-Local machine can run: pytest, ruff/pyrefly, `--training smoke`.
-Remote box (GPU + cache) is needed for: prepare_cache, check_actions,
-gate_sweep/stride_gate, ceiling_probe/overfit_check, real training,
-evaluate, plan_demo.
 
 ## Scripts, in running order
 
