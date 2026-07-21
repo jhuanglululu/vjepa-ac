@@ -15,33 +15,32 @@ from vjepa_ac.predictor import Predictor
 from vjepa_ac.variations import ModelConfig, TrainingConfig
 
 
+CONTEXT = 4
+HORIZON = 8
+MAX_STEPS = 25
+GOAL_TOL = 3
+STATE_TOPK = 8
+SAMPLES = 512
+ELITE = 64
+ITERS = 4
+ACTION_STD = 1.0
+ACTION_CLIP = 2.5
+ROLLOUT_BATCH = 128
+GIF_FPS = 3.0
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--episode", type=int, default=0)
     p.add_argument("--start", type=int, default=30)
     p.add_argument("--goal-offset", type=int, default=90)
-    p.add_argument("--context", type=int, default=4)
-    p.add_argument("--horizon", type=int, default=8)
-    p.add_argument("--max-steps", type=int, default=25)
-    p.add_argument("--goal-tol", type=int, default=3)
     p.add_argument("--commit-steps", type=int, default=1)
     p.add_argument("--snap", choices=["both", "state", "latent"], default="both")
-    p.add_argument("--state-topk", type=int, default=8)
     p.add_argument("--snap-range", type=int, nargs=2, default=None)
-    p.add_argument("--forward-only", action="store_true")
-    p.add_argument("--gain", default="auto")
     p.add_argument("--action-momentum", type=float, default=0.0)
     p.add_argument("--random-plan", action="store_true")
-    p.add_argument("--samples", type=int, default=512)
-    p.add_argument("--elite", type=int, default=64)
-    p.add_argument("--iters", type=int, default=4)
-    p.add_argument("--action-std", type=float, default=1.0)
-    p.add_argument("--action-clip", type=float, default=2.5)
-    p.add_argument("--rollout-batch", type=int, default=128)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--fps", type=float, default=3.0)
-    p.add_argument("--no-gif", action="store_true")
     p.add_argument("--device", default=None)
     p.add_argument("--out", default=None)
     return p.parse_args()
@@ -58,8 +57,8 @@ def main():
     mc = ModelConfig(**sidecar["config"]["model"])
     tc = TrainingConfig(**sidecar["config"]["training"])
     stride = tc.stride
-    assert args.context + args.horizon <= tc.T
-    assert args.commit_steps <= args.horizon
+    assert CONTEXT + HORIZON <= tc.T
+    assert args.commit_steps <= HORIZON
 
     cache = data.load_cache()
     cond = data.load_conditioner(cache.states, sidecar["conditioning"])
@@ -94,8 +93,8 @@ def main():
     goal_tok = ep_tokens[goal - a0]
     print(
         f"episode [{a0},{b0}) len {b0 - a0} | start {s0} (+{args.start}) | "
-        f"goal {goal} (goal is {goal - s0:+d} frames from start) | context {args.context} real frames | "
-        f"replan horizon {args.horizon} strided steps ({args.horizon * stride} frames) | "
+        f"goal {goal} (goal is {goal - s0:+d} frames from start) | context {CONTEXT} real frames | "
+        f"replan horizon {HORIZON} strided steps ({HORIZON * stride} frames) | "
         f"snap {args.snap} | commit {args.commit_steps} action(s)"
         + (" | RANDOM-PLAN CONTROL" if args.random_plan else "")
     )
@@ -132,34 +131,34 @@ def main():
             imag_n += pred[:, 0].reshape(len(bi), -1).norm(dim=1).sum().item()
         return max(1.0, min(8.0, real_n / max(imag_n, 1e-9)))
 
-    if args.snap == "latent" and args.gain == "auto":
+    if args.snap == "latent":
         gain = calibrate_gain()
         print(f"actuator gain (real/imagined one-step token delta, true actions): {gain:.2f}")
     else:
-        gain = 1.0 if args.gain == "auto" else float(args.gain)
+        gain = 1.0
 
     @torch.no_grad()
     def cem_plan(ctx_frames, last_action):
         C = len(ctx_frames)
-        H = args.horizon
+        H = HORIZON
         ctx_tok = ep_tokens[[i - a0 for i in ctx_frames]]
         ctx_act = [executed_features(ctx_frames[k], ctx_frames[k + 1]) for k in range(C - 1)]
         mu = torch.zeros(H, cache.state_dim, device=device)
         if args.action_momentum > 0 and last_action is not None:
             mu = args.action_momentum * last_action.expand(H, -1).clone()
         if args.random_plan:
-            return (torch.randn(H, cache.state_dim, device=device) * args.action_std).clamp(
-                -args.action_clip, args.action_clip
+            return (torch.randn(H, cache.state_dim, device=device) * ACTION_STD).clamp(
+                -ACTION_CLIP, ACTION_CLIP
             ), math.nan
-        sigma = torch.full((H, cache.state_dim), args.action_std, device=device)
+        sigma = torch.full((H, cache.state_dim), ACTION_STD, device=device)
         best_e = math.inf
-        for _ in range(args.iters):
-            noise = torch.randn(args.samples, H, cache.state_dim, device=device)
-            A = (mu + sigma * noise).clamp(-args.action_clip, args.action_clip)
+        for _ in range(ITERS):
+            noise = torch.randn(SAMPLES, H, cache.state_dim, device=device)
+            A = (mu + sigma * noise).clamp(-ACTION_CLIP, ACTION_CLIP)
             A[0] = mu
             energies = []
-            for i in range(0, len(A), args.rollout_batch):
-                Ab = A[i : i + args.rollout_batch]
+            for i in range(0, len(A), ROLLOUT_BATCH):
+                Ab = A[i : i + ROLLOUT_BATCH]
                 B = len(Ab)
                 s = torch.zeros(B, C + H, *ctx_tok.shape[1:], device=device)
                 s[:] = ctx_tok[-1]
@@ -173,7 +172,7 @@ def main():
                     s[:, t + 1] = s[:, t] + pred[:, t]
                 energies.append((s[:, -1] - goal_tok).abs().mean(dim=(1, 2)))
             e = torch.cat(energies)
-            elite = A[e.topk(args.elite, largest=False).indices]
+            elite = A[e.topk(ELITE, largest=False).indices]
             mu = 0.5 * mu + 0.5 * elite.mean(0)
             sigma = (0.5 * sigma + 0.5 * elite.std(0)).clamp(min=0.05)
             best_e = min(best_e, e.min().item())
@@ -195,7 +194,7 @@ def main():
             pred = forward(s, af)
             s[0, t + 1] = s[0, t] + pred[0, t]
         imagined = s[0, C - 1] + gain * (s[0, -1] - s[0, C - 1])
-        lo, hi = pool_bounds(ctx_frames[-1])
+        lo, hi = pool_bounds()
         if lo >= hi:
             return None
         d = torch.cdist(imagined.reshape(1, -1), flat_ep[lo:hi])[0]
@@ -204,13 +203,11 @@ def main():
     def wrap(x):
         return torch.remainder(x + math.pi, 2 * math.pi) - math.pi
 
-    def pool_bounds(cur):
+    def pool_bounds():
         lo, hi = 0, b0 - a0
         if args.snap_range is not None:
             lo = max(lo, args.snap_range[0])
             hi = min(hi, args.snap_range[1] + 1)
-        if args.forward_only:
-            lo = max(lo, cur + 1 - a0)
         return lo, hi
 
     def step_state(ctx_frames, actions_seq):
@@ -225,13 +222,13 @@ def main():
         grip_diff = ep_states[:, -1] - target_grip
         scale = ep_states.std(0).clamp(min=1e-3)
         d = ((diff / scale[:-1]) ** 2).sum(1) + (grip_diff / scale[-1]) ** 2
-        lo, hi = pool_bounds(cur)
+        lo, hi = pool_bounds()
         if lo >= hi:
             return None
         if args.snap == "state":
             return a0 + lo + int(d[lo:hi].argmin())
         d[cur - a0] = torch.inf
-        k = min(args.state_topk, int(torch.isfinite(d[lo:hi]).sum()))
+        k = min(STATE_TOPK, int(torch.isfinite(d[lo:hi]).sum()))
         if k == 0:
             return None
         cand = d[lo:hi].topk(k, largest=False).indices + lo
@@ -243,12 +240,12 @@ def main():
     trace = []
     stuck = 0
     last_action = None
-    while len(trace) < args.max_steps:
+    while len(trace) < MAX_STEPS:
         cur = committed[-1]
-        if abs(cur - goal) <= args.goal_tol:
+        if abs(cur - goal) <= GOAL_TOL:
             print(f"reached goal tolerance at frame {cur} ({cur - goal:+d} from goal)")
             break
-        ctx = committed[-args.context :]
+        ctx = committed[-CONTEXT:]
         mu, best_e = cem_plan(ctx, last_action)
         step_fn = step_once if args.snap == "latent" else step_state
         nxt = step_fn(ctx, mu[: args.commit_steps])
@@ -303,8 +300,8 @@ def main():
         )
 
     meta = cache.meta
-    if args.no_gif or "episode_ids" not in meta:
-        print("skipping gif (no video provenance in cache meta)" if not args.no_gif else "")
+    if "episode_ids" not in meta:
+        print("skipping gif (no video provenance in cache meta)")
         return
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -353,12 +350,12 @@ def main():
         )
         d.text((652, 6), f"goal | frame {goal} ({goal - s0:+d})", fill="white")
         frames.append(panel)
-    frames += [frames[-1]] * int(args.fps)
+    frames += [frames[-1]] * int(GIF_FPS)
     frames[0].save(
         out,
         save_all=True,
         append_images=frames[1:],
-        duration=int(1000 / args.fps),
+        duration=int(1000 / GIF_FPS),
         loop=0,
     )
     print(f"saved -> {out}")
