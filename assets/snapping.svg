@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" font-family="sans-serif" font-size="14">
+  <defs>
+    <marker id="cmd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4a90d9"/>
+    </marker>
+    <marker id="snap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#e08a3c"/>
+    </marker>
+  </defs>
+
+  <g stroke="#8b8b8b" stroke-width="1.5" fill="none">
+    <line x1="40" y1="40" x2="90" y2="40"/>
+  </g>
+  <circle cx="52" cy="40" r="4" fill="#8b8b8b"/>
+  <circle cx="78" cy="40" r="4" fill="#8b8b8b"/>
+  <text x="100" y="45" fill="#8b8b8b">recorded episode states — the only reachable world states</text>
+  <line x1="40" y1="68" x2="90" y2="68" stroke="#4a90d9" stroke-width="2.5" marker-end="url(#cmd)"/>
+  <text x="100" y="73" fill="#8b8b8b">commanded &#916;state — points toward the goal, lands off the path</text>
+  <line x1="40" y1="96" x2="90" y2="96" stroke="#e08a3c" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#snap)"/>
+  <text x="100" y="101" fill="#8b8b8b">snap — commit the nearest recorded state, replan from there</text>
+
+  <polyline points="60,260 150,180 240,300 330,210 400,330 490,260 560,150 650,240 740,160 830,200"
+            fill="none" stroke="#8b8b8b" stroke-width="2"/>
+
+  <circle cx="240" cy="300" r="7" fill="#8b8b8b"/>
+  <circle cx="400" cy="330" r="7" fill="#8b8b8b"/>
+  <circle cx="560" cy="150" r="7" fill="#8b8b8b"/>
+  <circle cx="650" cy="240" r="7" fill="#8b8b8b"/>
+  <circle cx="740" cy="160" r="7" fill="#8b8b8b"/>
+
+  <circle cx="150" cy="180" r="7" fill="#8b8b8b" stroke="#4a90d9" stroke-width="3"/>
+  <circle cx="330" cy="210" r="7" fill="#8b8b8b" stroke="#4a90d9" stroke-width="3"/>
+  <circle cx="490" cy="260" r="7" fill="#8b8b8b" stroke="#4a90d9" stroke-width="3"/>
+
+  <circle cx="60" cy="260" r="9" fill="#3fa34d"/>
+  <text x="60" y="290" fill="#3fa34d" text-anchor="middle">start</text>
+  <circle cx="830" cy="200" r="9" fill="#d9534f"/>
+  <text x="830" y="230" fill="#d9534f" text-anchor="middle">goal</text>
+
+  <line x1="72" y1="258" x2="175" y2="245" stroke="#4a90d9" stroke-width="2.5" marker-end="url(#cmd)"/>
+  <circle cx="175" cy="245" r="3.5" fill="none" stroke="#4a90d9" stroke-width="2"/>
+  <line x1="171" y1="235" x2="154" y2="190" stroke="#e08a3c" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#snap)"/>
+  <text x="118" y="236" fill="#4a90d9" font-weight="bold">1</text>
+
+  <line x1="162" y1="181" x2="265" y2="190" stroke="#4a90d9" stroke-width="2.5" marker-end="url(#cmd)"/>
+  <circle cx="265" cy="190" r="3.5" fill="none" stroke="#4a90d9" stroke-width="2"/>
+  <line x1="276" y1="193" x2="320" y2="207" stroke="#e08a3c" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#snap)"/>
+  <text x="208" y="172" fill="#4a90d9" font-weight="bold">2</text>
+
+  <line x1="341" y1="214" x2="450" y2="255" stroke="#4a90d9" stroke-width="2.5" marker-end="url(#cmd)"/>
+  <circle cx="450" cy="255" r="3.5" fill="none" stroke="#4a90d9" stroke-width="2"/>
+  <line x1="461" y1="256" x2="484" y2="259" stroke="#e08a3c" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#snap)"/>
+  <text x="386" y="222" fill="#4a90d9" font-weight="bold">3</text>
+
+  <text x="450" y="400" fill="#8b8b8b" text-anchor="middle">the command aims at the goal, but the world only contains recorded states — each step commits the nearest one</text>
+</svg>

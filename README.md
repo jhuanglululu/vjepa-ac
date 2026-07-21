@@ -121,6 +121,8 @@ The loop, per committed step:
    4 real frames), with the **executed** motion between committed frames —
    not the commanded action — as the context's action rows. Replan.
 
+![state snapping](assets/snapping.svg)
+
 What each mechanism is for:
 
 - **State snapping** solves the actuator problem. The model's own one-step
