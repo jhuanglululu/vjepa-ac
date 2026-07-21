@@ -250,18 +250,21 @@ def main():
             break
         ctx = committed[-args.context :]
         mu, best_e = cem_plan(ctx, last_action)
-        last_action = mu[0]
         step_fn = step_once if args.snap == "latent" else step_state
         nxt = step_fn(ctx, mu[: args.commit_steps])
         if nxt is None:
             print("episode end reached, stopping")
             break
-        phys = (mu[0].cpu() * cond.std + cond.mean).tolist()
-        trace.append({"from": cur, "to": nxt, "energy": best_e, "action": phys})
+        last_action = executed_features(cur, nxt)
+        feats = mu[: args.commit_steps].cpu() * cond.std + cond.mean
+        cmd = feats[:, :-1].sum(0).tolist() + [float(feats[-1, -1])]
+        ex = (last_action.cpu() * cond.std + cond.mean).tolist()
+        trace.append({"from": cur, "to": nxt, "energy": best_e, "commanded": cmd, "executed": ex})
         print(
             f"step {len(trace):>3} | frame {cur} -> {nxt} ({nxt - cur:+d}) | "
             f"goal dist {abs(nxt - goal):>3} | energy {best_e:.4f} | "
-            f"dxyz ({phys[0]:+.3f},{phys[1]:+.3f},{phys[2]:+.3f}) grip {phys[6]:.2f}"
+            f"cmd ({cmd[0]:+.3f},{cmd[1]:+.3f},{cmd[2]:+.3f}) grip {cmd[6]:.2f} | "
+            f"exec ({ex[0]:+.3f},{ex[1]:+.3f},{ex[2]:+.3f}) grip {ex[6]:.2f}"
         )
         if nxt == cur:
             stuck += 1
