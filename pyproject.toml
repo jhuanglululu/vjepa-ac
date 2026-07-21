@@ -45,4 +45,5 @@ src = ["src", "scripts", "tests"]
 testpaths = ["tests"]
 
 [tool.pyrefly]
+search-path = ["src", "scripts"]
 replace-imports-with-any = ["transformers.*", "av.*", "pyarrow.*", "huggingface_hub.*", "PIL.*"]

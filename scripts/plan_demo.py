@@ -130,7 +130,9 @@ def main():
 
     phys = (mu.cpu() * cond.std + cond.mean).numpy()
     print("\nplan (denormalized conditioning per strided step):")
-    print(f"{'t':>3} | {'dx':>7} {'dy':>7} {'dz':>7} | {'grip':>5} | retrieved frame (offset from start)")
+    print(
+        f"{'t':>3} | {'dx':>7} {'dy':>7} {'dz':>7} | {'grip':>5} | retrieved frame (offset from start)"
+    )
     for t in range(H):
         r = retrieved[t + 1]
         print(
@@ -185,9 +187,7 @@ def main():
     from_ts = emeta[f"videos/{key}/from_timestamp"][row]
     chunk = emeta[f"videos/{key}/chunk_index"][row]
     fidx = emeta[f"videos/{key}/file_index"][row]
-    path = pc.hub_file(
-        f"{data.DATASET_SPLIT}/videos/{key}/chunk-{chunk:03d}/file-{fidx:03d}.mp4"
-    )
+    path = pc.hub_file(f"{data.DATASET_SPLIT}/videos/{key}/chunk-{chunk:03d}/file-{fidx:03d}.mp4")
 
     def grab(cache_idx):
         frame_in_video = trim + (cache_idx - a0)
