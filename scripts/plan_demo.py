@@ -26,7 +26,11 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=25)
     p.add_argument("--goal-tol", type=int, default=3)
     p.add_argument("--commit-steps", type=int, default=1)
-    p.add_argument("--any-direction", action="store_true")
+    p.add_argument("--snap", choices=["state", "latent"], default="state")
+    p.add_argument("--forward-only", action="store_true")
+    p.add_argument("--gain", default="auto")
+    p.add_argument("--action-momentum", type=float, default=0.0)
+    p.add_argument("--random-plan", action="store_true")
     p.add_argument("--samples", type=int, default=512)
     p.add_argument("--elite", type=int, default=64)
     p.add_argument("--iters", type=int, default=4)
@@ -89,7 +93,9 @@ def main():
     print(
         f"episode [{a0},{b0}) len {b0 - a0} | start {s0} (+{args.start}) | "
         f"goal {goal} (goal is {goal - s0} frames ahead) | context {args.context} real frames | "
-        f"replan horizon {args.horizon} strided steps ({args.horizon * stride} frames)"
+        f"replan horizon {args.horizon} strided steps ({args.horizon * stride} frames) | "
+        f"snap {args.snap} | commit {args.commit_steps} action(s)"
+        + (" | RANDOM-PLAN CONTROL" if args.random_plan else "")
     )
 
     def executed_features(i, j):
@@ -99,12 +105,42 @@ def main():
         return ((feats - cond.mean) / cond.std).to(device)
 
     @torch.no_grad()
-    def cem_plan(ctx_frames):
+    def calibrate_gain():
+        idx = torch.arange(a0, b0 - stride)
+        if len(idx) > 256:
+            idx = idx[torch.randperm(len(idx), generator=torch.Generator().manual_seed(0))[:256]]
+        real_n, imag_n = 0.0, 0.0
+        for i in range(0, len(idx), 64):
+            bi = idx[i : i + 64]
+            tok0 = ep_tokens[bi - a0]
+            tok1 = ep_tokens[bi - a0 + stride]
+            af = torch.stack([executed_features(int(t), int(t) + stride) for t in bi])[:, None, :]
+            af = torch.cat([af, torch.zeros_like(af)], dim=1)
+            s = torch.stack([tok0, tok0], dim=1)
+            pred = forward(s, af)
+            real_n += (tok1 - tok0).reshape(len(bi), -1).norm(dim=1).sum().item()
+            imag_n += pred[:, 0].reshape(len(bi), -1).norm(dim=1).sum().item()
+        return max(1.0, min(8.0, real_n / max(imag_n, 1e-9)))
+
+    if args.snap == "latent" and args.gain == "auto":
+        gain = calibrate_gain()
+        print(f"actuator gain (real/imagined one-step token delta, true actions): {gain:.2f}")
+    else:
+        gain = 1.0 if args.gain == "auto" else float(args.gain)
+
+    @torch.no_grad()
+    def cem_plan(ctx_frames, last_action):
         C = len(ctx_frames)
         H = args.horizon
         ctx_tok = ep_tokens[[i - a0 for i in ctx_frames]]
         ctx_act = [executed_features(ctx_frames[k], ctx_frames[k + 1]) for k in range(C - 1)]
         mu = torch.zeros(H, cache.state_dim, device=device)
+        if args.action_momentum > 0 and last_action is not None:
+            mu = args.action_momentum * last_action.expand(H, -1).clone()
+        if args.random_plan:
+            return (torch.randn(H, cache.state_dim, device=device) * args.action_std).clamp(
+                -args.action_clip, args.action_clip
+            ), math.nan
         sigma = torch.full((H, cache.state_dim), args.action_std, device=device)
         best_e = math.inf
         for _ in range(args.iters):
@@ -148,24 +184,47 @@ def main():
         for t in range(C - 1, C + k - 1):
             pred = forward(s, af)
             s[0, t + 1] = s[0, t] + pred[0, t]
-        imagined = s[0, -1]
-        lo = 0 if args.any_direction else (ctx_frames[-1] + 1 - a0)
+        imagined = s[0, C - 1] + gain * (s[0, -1] - s[0, C - 1])
+        lo = (ctx_frames[-1] + 1 - a0) if args.forward_only else 0
         if lo >= len(flat_ep):
             return None
         d = torch.cdist(imagined.reshape(1, -1), flat_ep[lo:])[0]
         return a0 + lo + int(d.argmin())
 
+    def wrap(x):
+        return torch.remainder(x + math.pi, 2 * math.pi) - math.pi
+
+    def step_state(ctx_frames, actions_seq):
+        cur = ctx_frames[-1]
+        feats = actions_seq.cpu() * cond.std + cond.mean
+        target = cond.states[cur, :-1] + feats[:, :-1].sum(0)
+        target[3:] = wrap(target[3:])
+        target_grip = feats[-1, -1]
+        ep_states = cond.states[a0:b0]
+        diff = ep_states[:, :-1] - target
+        diff[:, 3:] = wrap(diff[:, 3:])
+        grip_diff = ep_states[:, -1] - target_grip
+        scale = ep_states.std(0).clamp(min=1e-3)
+        d = ((diff / scale[:-1]) ** 2).sum(1) + (grip_diff / scale[-1]) ** 2
+        lo = (cur + 1 - a0) if args.forward_only else 0
+        if lo >= len(d):
+            return None
+        return a0 + lo + int(d[lo:].argmin())
+
     committed = [s0]
     trace = []
     stuck = 0
+    last_action = None
     while len(trace) < args.max_steps:
         cur = committed[-1]
         if abs(cur - goal) <= args.goal_tol:
             print(f"reached goal tolerance at frame {cur} ({cur - goal:+d} from goal)")
             break
         ctx = committed[-args.context :]
-        mu, best_e = cem_plan(ctx)
-        nxt = step_once(ctx, mu[: args.commit_steps])
+        mu, best_e = cem_plan(ctx, last_action)
+        last_action = mu[0]
+        step_fn = step_state if args.snap == "state" else step_once
+        nxt = step_fn(ctx, mu[: args.commit_steps])
         if nxt is None:
             print("episode end reached, stopping")
             break
@@ -202,6 +261,9 @@ def main():
                 "start": s0,
                 "goal": goal,
                 "stride": stride,
+                "snap": args.snap,
+                "commit_steps": args.commit_steps,
+                "random_plan": args.random_plan,
                 "committed": committed,
                 "trace": trace,
             },
