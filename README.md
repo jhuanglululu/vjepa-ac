@@ -20,7 +20,7 @@ box, while tests and the smoke variation run locally on CPU.
 
 ```
 uv sync                 # local: tests + smoke runs (CPU is fine)
-uv sync --extra cache   # remote: adds transformers + lerobot for cache building
+uv sync --extra cache   # remote: adds transformers/pyarrow/av/pillow for cache building + gifs
 ```
 
 Optional env vars (all paths, with defaults): `VJEPA_CACHE_DIR`
@@ -32,63 +32,148 @@ Remote box (GPU + cache) is needed for: prepare_cache, check_actions,
 gate_sweep/stride_gate, ceiling_probe/overfit_check, real training,
 evaluate, plan_demo.
 
-## Usage
+## Scripts, in running order
+
+Before anything remote: `uv run pytest` (unit tests) and
+`uv run scripts/train.py --model tiny --training smoke` (50-step CPU sanity
+check on synthetic data) should both pass locally. Scripts whose knobs you
+never touch expose only `--stride`/`--seed`; everything else is a constant at
+the top of the script.
+
+### 1. prepare_cache.py — build the per-camera latent caches
 
 ```
-uv run pytest                                                  # 1. local: unit tests
-uv run scripts/train.py --model tiny --training smoke          # 2. local: 50-step sanity check
-uv run scripts/prepare_cache.py --episodes 100 --trim 15       # 3. remote: per-camera latent caches
-uv run scripts/check_actions.py --cache-dir latent_cache/wrist # 4. remote: confirm action/state semantics
-uv run scripts/gate_sweep.py --seeds 1                         # 5. remote: stride gate on every camera, one free GPU each
-uv run scripts/stride_gate.py --cache-dir latent_cache/wrist   # 5b. single-camera gate (full 3 seeds)
-uv run scripts/ceiling_probe.py --stride 6                     # 6. remote: action-attributable share of latent deltas
-uv run scripts/train_compressor.py --stride 6                  # 7. remote: phase-1 compressor + gates
-uv run scripts/train.py --model base-c16 --training c-full --seed 0 --no-rollout  # 8. remote: compressed-space training
-uv run scripts/evaluate.py                                     # 9. defaults to weights/model.safetensors
-uv run scripts/plan_demo.py                                    # 10. MPC demo + gif, same default weights
-uv run scripts/overfit_check.py --stride 6                     # optional: action-use A/B diagnostic
+uv run scripts/prepare_cache.py --episodes 100 --trim 15
 ```
 
-For compressed-space models (`*-c*`) train.py loads the phase-1 compressor
-from `checkpoints/<model>/comp-s<stride>/<seed>/compressor.safetensors`
-(override with `--compressor`), fine-tunes it at `compressor_lr` with
-stop-grad targets and the inverse-dynamics auxiliary (`id_weight`), and logs
-a collapse monitor (val token std + ID loss) at every val interval. The
-phase-2 checkpoint bundles compressor and predictor, so evaluate.py works on
-it unchanged. train_compressor.py, stride_gate.py, and overfit_check.py take
-only `--stride`/`--seed`(`--seeds`) — their remaining knobs are constants at
-the top of each script.
+Downloads only the Cosmos3-DROID shards covering the first `--episodes`
+episodes, drops the first `--trim` frames of each (arm out of view), decodes
+each camera's video, and encodes every frame with the frozen V-JEPA encoder
+on up to 4 free GPUs. Writes one cache per camera to `latent_cache/<cam>/`
+(`--cameras ext1 ext2 wrist`) with states, actions, and episode ranges, then
+prints a health check. Every later script picks its camera via `--cache-dir`
+or `VJEPA_CACHE_DIR` (default `./latent_cache`, so after choosing a camera
+you can move that cache to the root and drop the flag).
 
-prepare_cache.py downloads only the shards covering the requested episodes
-and writes one cache per camera under `latent_cache/<cam>/`; every consumer
-(train, evaluate, probe, check_actions, stride_gate) picks the camera via
-`--cache-dir` or the `VJEPA_CACHE_DIR` env var. gate_sweep.py launches one
-stride_gate per camera, each pinned to a free GPU (at most `--max-gpus 4`),
-and prints the combined verdict table when all finish.
+### 2. check_actions.py — confirm state/action semantics
 
-Run stride_gate.py before training: per stride and seed it trains two 23M
-probes (per-patch MLP blocks with no cross-patch mixing, then multihead
-cross-attention with one learned query pooling the 256 patches into a single
-vector, then MLP blocks and a projection out) — one on latent pairs
-(z_t, z_{t+s}) and one z0-only control with the second frame ablated — to
-recover the exact conditioning features. The decision statistic is the
-pair-minus-control margin on motion dims (gripper excluded): information
-redundant with z_t is useless as conditioning, so only the margin counts.
-Scores are reported with errors combining a bootstrap over test episodes and
-seed spread; checkpoints are selected on held-out episodes disjoint from the
-reported test episodes; a stride passes when pair R2 − SE clears --threshold
-and margin − SE clears --margin. Fails are split into conclusive (probe fit
-its training set) vs probe-limited (train R2 < 0.5, inconclusive), and the
-recommendation checks that training windows actually exist at T=16 for the
-chosen stride. `--stride N` on train.py overrides the variation's stride and
-records under `<training>-s<N>`; `--no-rollout` drops the two-pass rollout
-loss term and records under `<training>-noroll` (suffixes combine).
-evaluate.py reads the model and training config plus the conditioning stats
-from the checkpoint's JSON sidecar, so it takes only the checkpoint path;
-`--horizons` are counted in strided steps.
+```
+uv run scripts/check_actions.py --cache-dir latent_cache/wrist
+```
 
-Training resumes from `current.safetensors` automatically if one exists in the
-run's checkpoint directory; delete the directory to start fresh.
+Prints per-dim correlations between commanded actions, wrap-corrected state
+deltas, and absolute states from the cache. Confirm before training: dims
+0-5 behave like cartesian velocity commands (corr(a,dS) clearly positive)
+and the last dim is the absolute gripper (corr(a,s) ~ +1).
+
+### 3. gate_sweep.py — pick the camera and stride
+
+```
+uv run scripts/gate_sweep.py --seeds 1     # quick pass, all cameras
+uv run scripts/stride_gate.py --cache-dir latent_cache/ext1 --strides 4 6   # confirm winner, 3 seeds
+```
+
+gate_sweep launches one stride_gate per camera, each pinned to a free GPU
+(at most `--max-gpus 4`), and prints a combined verdict table. stride_gate
+itself trains, per stride and seed, two 23M probes to recover the exact
+conditioning features — one from latent pairs (z_t, z_{t+s}), one z0-only
+control — because information redundant with z_t is useless as conditioning:
+the decision statistic is the pair-minus-control margin on motion dims.
+Errors combine a bootstrap over held-out test episodes with seed spread, and
+a stride passes only when both pair R2 − SE and margin − SE clear their
+thresholds. Fails are labeled conclusive vs probe-limited (train R2 < 0.5),
+and the verdict checks that training windows exist at the chosen stride.
+JSON lands in `records/diagnostics/`.
+
+### 4. ceiling_probe.py — size the prize before training
+
+```
+uv run scripts/ceiling_probe.py --stride 6
+```
+
+Ridge-regresses raw latent deltas from the conditioning features and reports
+the held-out, scene-independent action-attributable share of the training
+loss. On these caches it reads ~0%: actions explain none of the raw latent
+delta without action-x-content interactions — the measurement that motivated
+predicting in a learned compressed space instead of raw latents.
+
+### 5. train_compressor.py — phase 1: learn the prediction space
+
+```
+uv run scripts/train_compressor.py --stride 6
+```
+
+Trains the base-c16 compressor (16 learned queries cross-attending over the
+256 patches) plus an inverse-dynamics head, with a light reconstruction term
+so the tokens keep forecastable context. Selects the best checkpoint on
+held-out ID motion R2, saves it under
+`checkpoints/base-c16/comp-s<stride>/<seed>/compressor.safetensors`, and
+prints two go/no-go gates: held-out ID R2 >= 0.2 (the compressor found the
+motion signal) and C-space linear ceiling >= +2% (the token space is
+action-driven, unlike raw latents). Do not spend phase-2 GPU time if either
+fails.
+
+### 6. train.py — phase 2: train the predictor
+
+```
+uv run scripts/train.py --model base-c16 --training c-full --seed 0
+```
+
+For compressed models it auto-loads the phase-1 compressor (override with
+`--compressor`) and fine-tunes it at `compressor_lr` with three collapse
+guards: stop-grad targets, the inverse-dynamics auxiliary (`id_weight`), and
+a monitor printing val token std + ID loss each val interval (falling std or
+rising ID loss means the compressor is cheating — lower `compressor_lr`).
+`--stride N` overrides the variation's stride (records under
+`<training>-s<N>`); `--no-rollout` drops the two-pass rollout loss
+(`<training>-noroll`; at stride 6 the rollout loss measurably helps, so the
+default keeps it). Resumes automatically from `current.safetensors` if the
+run directory exists; checkpoints bundle compressor + predictor.
+
+### 7. evaluate.py — action sensitivity and rollout quality
+
+```
+uv run scripts/evaluate.py            # defaults to weights/model.safetensors
+```
+
+Reads config + conditioning stats from the checkpoint sidecar, rolls the
+model out on held-out episodes, and prints latent L1 against copy-first /
+zero-action / shuffled-action baselines per horizon plus within-episode
+frame retrieval. Adoption criterion: shuffled >= +10% worse at max horizon
+and model/copy <= 0.9. The shipped weights score shuffled +50-65% and
+model/copy ~0.67-0.73 at h=15, with retrieval tracking the true frame
+(median offset ~0 vs copy's -h*stride).
+
+### 8. plan_demo.py — receding-horizon MPC demo
+
+```
+uv run scripts/plan_demo.py           # same default weights
+```
+
+Picks a held-out episode, takes the frame at `--start` as current state and
+`--goal-offset` frames ahead (negative works) as the goal image, then loops:
+CEM (re-initialized N(0,1) each step) scores imagined token rollouts by L1
+to the goal tokens, only the first `--commit-steps` actions execute, and
+execution is model-independent kinematics — commanded wrap-aware dstate
+applied to the real proprio state, snapped to the nearest-state episode
+frame. The context holds only real frames, with executed (not commanded)
+motion between them. Prints required vs commanded vs executed motion per
+step to separate planner error from simulator error; `--snap-range LO HI`
+restricts snapping to a frame window when pose aliasing teleports across
+task phases (same arm pose, different world state). Saves a side-by-side
+gif of committed frames vs the goal next to the checkpoint.
+
+### overfit_check.py — optional action-use diagnostic
+
+```
+uv run scripts/overfit_check.py --stride 6
+```
+
+Trains twin raw-space models on a fixed 512-window subset — true actions vs
+permanently shuffled — and reports the A/B loss gap plus eval-time shuffle
+sensitivity. Separates "optimization/scale problem" (sensitivity grows with
+training) from "structural blindness" (flat at zero) when a model ignores
+its actions.
 
 ## Variations
 
