@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -20,10 +21,13 @@ def parse_args():
     p.add_argument("--episode", type=int, default=0)
     p.add_argument("--start", type=int, default=30)
     p.add_argument("--goal-offset", type=int, default=90)
-    p.add_argument("--horizon", type=int, default=15)
+    p.add_argument("--context", type=int, default=4)
+    p.add_argument("--horizon", type=int, default=8)
+    p.add_argument("--max-steps", type=int, default=25)
+    p.add_argument("--goal-tol", type=int, default=3)
     p.add_argument("--samples", type=int, default=512)
     p.add_argument("--elite", type=int, default=64)
-    p.add_argument("--iters", type=int, default=6)
+    p.add_argument("--iters", type=int, default=4)
     p.add_argument("--action-std", type=float, default=1.0)
     p.add_argument("--action-clip", type=float, default=2.5)
     p.add_argument("--rollout-batch", type=int, default=128)
@@ -46,7 +50,7 @@ def main():
     mc = ModelConfig(**sidecar["config"]["model"])
     tc = TrainingConfig(**sidecar["config"]["training"])
     stride = tc.stride
-    assert args.horizon <= tc.T - 1
+    assert args.context + args.horizon <= tc.T
 
     cache = data.load_cache()
     cond = data.load_conditioner(cache.states, sidecar["conditioning"])
@@ -74,75 +78,103 @@ def main():
         j = min(i + 64, b0)
         ep_tokens.append(to_space(cache.latents[i:j].to(device).float()))
     ep_tokens = torch.cat(ep_tokens)
+    flat_ep = ep_tokens.reshape(len(ep_tokens), -1)
 
     s0 = a0 + args.start
     goal = min(s0 + args.goal_offset, b0 - 1)
-    span = args.horizon * stride
+    goal_tok = ep_tokens[goal - a0]
     print(
         f"episode [{a0},{b0}) len {b0 - a0} | start {s0} (+{args.start}) | "
-        f"goal {goal} (+{goal - a0}) | horizon {args.horizon} strided steps "
-        f"({span} frames) | goal is {goal - s0} frames ahead"
+        f"goal {goal} (goal is {goal - s0} frames ahead) | context {args.context} real frames | "
+        f"replan horizon {args.horizon} strided steps ({args.horizon * stride} frames)"
     )
-    start_tok = ep_tokens[s0 - a0]
-    goal_tok = ep_tokens[goal - a0]
 
-    H = args.horizon
+    def executed_features(i, j):
+        delta = cond.delta_cumsum[j] - cond.delta_cumsum[i]
+        grip = cond.states[j][..., -1:]
+        feats = torch.cat([delta[..., :-1], grip], dim=-1)
+        return ((feats - cond.mean) / cond.std).to(device)
 
     @torch.no_grad()
-    def rollout_energy(acts_h):
-        energies = []
-        for i in range(0, len(acts_h), args.rollout_batch):
-            A = acts_h[i : i + args.rollout_batch]
-            B = len(A)
-            s = start_tok.expand(B, H + 1, *start_tok.shape).clone()
-            a_full = torch.zeros(B, H + 1, cache.state_dim, device=device)
-            a_full[:, :H] = A
-            for t in range(H):
-                pred = forward(s, a_full)
-                s[:, t + 1] = s[:, t] + pred[:, t]
-            energies.append((s[:, -1] - goal_tok).abs().mean(dim=(1, 2)))
-        return torch.cat(energies)
+    def cem_plan(ctx_frames):
+        C = len(ctx_frames)
+        H = args.horizon
+        ctx_tok = ep_tokens[[i - a0 for i in ctx_frames]]
+        ctx_act = [executed_features(ctx_frames[k], ctx_frames[k + 1]) for k in range(C - 1)]
+        mu = torch.zeros(H, cache.state_dim, device=device)
+        sigma = torch.full((H, cache.state_dim), args.action_std, device=device)
+        best_e = math.inf
+        for _ in range(args.iters):
+            noise = torch.randn(args.samples, H, cache.state_dim, device=device)
+            A = (mu + sigma * noise).clamp(-args.action_clip, args.action_clip)
+            A[0] = mu
+            energies = []
+            for i in range(0, len(A), args.rollout_batch):
+                Ab = A[i : i + args.rollout_batch]
+                B = len(Ab)
+                s = torch.zeros(B, C + H, *ctx_tok.shape[1:], device=device)
+                s[:] = ctx_tok[-1]
+                s[:, :C] = ctx_tok
+                af = torch.zeros(B, C + H, cache.state_dim, device=device)
+                for k in range(C - 1):
+                    af[:, k] = ctx_act[k]
+                af[:, C - 1 : C - 1 + H] = Ab
+                for t in range(C - 1, C + H - 1):
+                    pred = forward(s, af)
+                    s[:, t + 1] = s[:, t] + pred[:, t]
+                energies.append((s[:, -1] - goal_tok).abs().mean(dim=(1, 2)))
+            e = torch.cat(energies)
+            elite = A[e.topk(args.elite, largest=False).indices]
+            mu = 0.5 * mu + 0.5 * elite.mean(0)
+            sigma = (0.5 * sigma + 0.5 * elite.std(0)).clamp(min=0.05)
+            best_e = min(best_e, e.min().item())
+        return mu, best_e
 
-    mu = torch.zeros(H, cache.state_dim, device=device)
-    sigma = torch.full((H, cache.state_dim), args.action_std, device=device)
-    for it in range(args.iters):
-        noise = torch.randn(args.samples, H, cache.state_dim, device=device)
-        A = (mu + sigma * noise).clamp(-args.action_clip, args.action_clip)
-        A[0] = mu
-        e = rollout_energy(A)
-        elite = A[e.topk(args.elite, largest=False).indices]
-        mu = 0.5 * mu + 0.5 * elite.mean(0)
-        sigma = (0.5 * sigma + 0.5 * elite.std(0)).clamp(min=0.05)
-        print(f"cem iter {it + 1}/{args.iters} | best {e.min():.4f} | mean {e.mean():.4f}")
+    @torch.no_grad()
+    def step_once(ctx_frames, action):
+        C = len(ctx_frames)
+        ctx_tok = ep_tokens[[i - a0 for i in ctx_frames]]
+        s = ctx_tok[None].clone()
+        af = torch.zeros(1, C, cache.state_dim, device=device)
+        for k in range(C - 1):
+            af[0, k] = executed_features(ctx_frames[k], ctx_frames[k + 1])
+        af[0, C - 1] = action
+        pred = forward(s, af)
+        imagined = s[0, C - 1] + pred[0, C - 1]
+        d = torch.cdist(imagined.reshape(1, -1), flat_ep)[0]
+        return a0 + int(d.argmin())
 
-    s = start_tok.expand(1, H + 1, *start_tok.shape).clone()
-    a_full = torch.zeros(1, H + 1, cache.state_dim, device=device)
-    a_full[:, :H] = mu
-    for t in range(H):
-        pred = forward(s, a_full)
-        s[:, t + 1] = s[:, t] + pred[:, t]
-
-    flat_ep = ep_tokens.reshape(len(ep_tokens), -1)
-    retrieved = [s0]
-    for t in range(1, H + 1):
-        d = torch.cdist(s[0, t].reshape(1, -1), flat_ep)[0]
-        retrieved.append(a0 + int(d.argmin()))
-
-    phys = (mu.cpu() * cond.std + cond.mean).numpy()
-    print("\nplan (denormalized conditioning per strided step):")
-    print(
-        f"{'t':>3} | {'dx':>7} {'dy':>7} {'dz':>7} | {'grip':>5} | retrieved frame (offset from start)"
-    )
-    for t in range(H):
-        r = retrieved[t + 1]
+    committed = [s0]
+    trace = []
+    stuck = 0
+    while len(trace) < args.max_steps:
+        cur = committed[-1]
+        if abs(cur - goal) <= args.goal_tol:
+            print(f"reached goal tolerance at frame {cur} ({cur - goal:+d} from goal)")
+            break
+        ctx = committed[-args.context :]
+        mu, best_e = cem_plan(ctx)
+        nxt = step_once(ctx, mu[0])
+        phys = (mu[0].cpu() * cond.std + cond.mean).tolist()
+        trace.append({"from": cur, "to": nxt, "energy": best_e, "action": phys})
         print(
-            f"{t:>3} | {phys[t][0]:+.3f} {phys[t][1]:+.3f} {phys[t][2]:+.3f} | "
-            f"{phys[t][6]:>5.2f} | {r} ({r - s0:+d})"
+            f"step {len(trace):>3} | frame {cur} -> {nxt} ({nxt - cur:+d}) | "
+            f"goal dist {abs(nxt - goal):>3} | energy {best_e:.4f} | "
+            f"dxyz ({phys[0]:+.3f},{phys[1]:+.3f},{phys[2]:+.3f}) grip {phys[6]:.2f}"
         )
-    final = retrieved[-1]
+        if nxt == cur:
+            stuck += 1
+            if stuck >= 3:
+                print("no progress for 3 consecutive steps, stopping")
+                break
+        else:
+            stuck = 0
+        committed.append(nxt)
+
+    final = committed[-1]
     print(
-        f"\ngoal frame {goal} (+{goal - s0}) | final retrieved {final} ({final - s0:+d}) | "
-        f"miss {abs(final - goal)} frames"
+        f"\ncommitted {len(committed) - 1} steps | final frame {final} ({final - s0:+d} from "
+        f"start) | goal {goal} ({goal - s0:+d}) | miss {abs(final - goal)} frames"
     )
 
     out = args.out or os.path.join(
@@ -155,10 +187,9 @@ def main():
                 "episode_range": [a0, b0],
                 "start": s0,
                 "goal": goal,
-                "horizon": H,
                 "stride": stride,
-                "retrieved": retrieved,
-                "plan_normalized": mu.cpu().tolist(),
+                "committed": committed,
+                "trace": trace,
             },
             f,
             indent=2,
@@ -202,13 +233,17 @@ def main():
 
     goal_im = grab(goal).resize((640, 360))
     frames = []
-    for t, idx in enumerate(retrieved):
+    for t, idx in enumerate(committed):
         cur = grab(idx).resize((640, 360))
         panel = Image.new("RGB", (1280 + 8, 360 + 26), "black")
         panel.paste(cur, (0, 26))
         panel.paste(goal_im, (648, 26))
         d = ImageDraw.Draw(panel)
-        d.text((4, 6), f"plan step {t}/{H} | frame {idx} ({idx - s0:+d})", fill="white")
+        d.text(
+            (4, 6),
+            f"mpc step {t}/{len(committed) - 1} | frame {idx} ({idx - s0:+d})",
+            fill="white",
+        )
         d.text((652, 6), f"goal | frame {goal} ({goal - s0:+d})", fill="white")
         frames.append(panel)
     frames += [frames[-1]] * int(args.fps)
