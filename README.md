@@ -12,6 +12,15 @@ split, one task family by intent — similar scenes make cross-episode
 generalization feasible at this scale). Real runs happen on a remote GPU box;
 tests and the smoke variation run locally on CPU.
 
+Goal-image MPC on held-out episodes — left: frames the planner committed,
+right: the goal it was given (see "Demo process" for how execution works):
+
+![planning toward a goal image, reached in 11 steps](gif/plan-roll-1.gif)
+
+![second episode, reached in 4 steps](gif/plan-roll-2.gif)
+
+![third run, +71 of +90 frames covered at the step cap](gif/plan-roll-3.gif)
+
 ## How and why this differs from Facebook's
 
 V-JEPA 2-AC trains a ~300M block-causal predictor to output the **full patch
