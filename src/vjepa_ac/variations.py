@@ -11,7 +11,6 @@ class ModelConfig(BaseModel):
     d_ff: int
     n_heads: int
     n_layers: int
-    per_patch_action: bool = False
     compressor: bool = False
     comp_patches: int = 256
     comp_d_latent: int = 1024
@@ -48,7 +47,6 @@ class TrainingConfig(BaseModel):
 
 MODELS: dict[str, ModelConfig] = {
     "base": ModelConfig(d_model=512, d_ff=2048, n_heads=16, n_layers=6),
-    "base-pp": ModelConfig(d_model=512, d_ff=2048, n_heads=16, n_layers=6, per_patch_action=True),
     "base-c16": ModelConfig(
         d_state=384,
         patch_grid=4,

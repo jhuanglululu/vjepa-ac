@@ -29,7 +29,8 @@ Optional env vars (all paths, with defaults): `VJEPA_CACHE_DIR`
 
 Local machine can run: pytest, ruff/pyrefly, `--training smoke`, export.
 Remote box (GPU + cache) is needed for: prepare_cache, check_actions,
-gate_sweep/stride_gate, real training, evaluate, probe.
+gate_sweep/stride_gate, ceiling_probe/overfit_check, real training,
+evaluate, plan_demo.
 
 ## Usage
 
@@ -45,8 +46,8 @@ uv run scripts/train_compressor.py --model base-c16 --stride 6 # 7. remote: phas
 uv run scripts/train.py --model base-c16 --training c-full --seed 0 --no-rollout  # 8. remote: compressed-space training
 uv run scripts/evaluate.py --checkpoint checkpoints/base-c16/c-full-noroll/0/current.safetensors  # 9.
 uv run scripts/export.py --checkpoint checkpoints/base-c16/c-full-noroll/0/current.safetensors    # 10. weights-only
-uv run scripts/probe.py --target dstate                        # optional: raw latent diagnostics
 uv run scripts/overfit_check.py --stride 6                     # optional: action-use A/B diagnostic
+uv run scripts/plan_demo.py --checkpoint checkpoints/base-c16/c-full/0/current.safetensors  # MPC demo + gif
 ```
 
 For compressed-space models (`*-c*`) train.py loads the phase-1 compressor
@@ -94,8 +95,7 @@ run's checkpoint directory; delete the directory to start fresh.
 - `tiny` — smoke runs and shape checks on a small synthetic grid, never real results
 - `tiny-c` — tiny compressed-space twin for exercising the compressor path locally
 - `base` — the paper-scale predictor for the vjepa2-vitl 16x16x1024 latent grid
-- `base-pp` — base with the action embedding added to every patch token (per-patch
-  injection), so conditioning does not compete for attention against 256 content tokens
+  (kept as the documented raw-latent negative baseline)
 - `base-c16` — compressor (16 learned queries over the 256 patches, trained on inverse
   dynamics + light reconstruction, then fine-tuned at `compressor_lr`) + predictor
   operating entirely in the 16x384 token space; needs a phase-1 checkpoint from
@@ -117,13 +117,14 @@ New variation = new entry there and a line here, in the same change.
   sidecar), `current.*` for resume, 3 best by val loss kept, `model.safetensors`
   from export
 - `latent_cache/<cam>/` — `latents.safetensors` + `cache.json` per camera from prepare_cache
-- `records/diagnostics/` — probe output
+- `records/diagnostics/` — stride_gate/gate_sweep output
 
 ## Notes
 
 - Train/val split is episode-level (`data.split_episodes`, seed 0), shared by
-  train.py, evaluate.py, and probe.py; a smaller val_frac holds out a subset
-  of a larger one's episodes, so probes and training agree on what is unseen.
+  train.py, evaluate.py, stride_gate.py, and the diagnostics; a smaller
+  val_frac holds out a subset of a larger one's episodes, so probes and
+  training agree on what is unseen.
 - Checkpoints must use the `model.`-prefixed tensor layout and carry a JSON
   sidecar; pre-restructure checkpoints no longer load, and caches without
   states must be rebuilt with prepare_cache.py.
