@@ -26,7 +26,8 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=25)
     p.add_argument("--goal-tol", type=int, default=3)
     p.add_argument("--commit-steps", type=int, default=1)
-    p.add_argument("--snap", choices=["state", "latent"], default="state")
+    p.add_argument("--snap", choices=["both", "state", "latent"], default="both")
+    p.add_argument("--state-topk", type=int, default=8)
     p.add_argument("--forward-only", action="store_true")
     p.add_argument("--gain", default="auto")
     p.add_argument("--action-momentum", type=float, default=0.0)
@@ -209,7 +210,16 @@ def main():
         lo = (cur + 1 - a0) if args.forward_only else 0
         if lo >= len(d):
             return None
-        return a0 + lo + int(d[lo:].argmin())
+        if args.snap == "state":
+            return a0 + lo + int(d[lo:].argmin())
+        d[cur - a0] = torch.inf
+        k = min(args.state_topk, int(torch.isfinite(d[lo:]).sum()))
+        if k == 0:
+            return None
+        cand = d[lo:].topk(k, largest=False).indices + lo
+        cur_flat = flat_ep[cur - a0].reshape(1, -1)
+        dl = torch.cdist(cur_flat, flat_ep[cand.to(device)])[0]
+        return a0 + int(cand[int(dl.argmin())])
 
     committed = [s0]
     trace = []
@@ -223,7 +233,7 @@ def main():
         ctx = committed[-args.context :]
         mu, best_e = cem_plan(ctx, last_action)
         last_action = mu[0]
-        step_fn = step_state if args.snap == "state" else step_once
+        step_fn = step_once if args.snap == "latent" else step_state
         nxt = step_fn(ctx, mu[: args.commit_steps])
         if nxt is None:
             print("episode end reached, stopping")
