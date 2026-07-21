@@ -11,6 +11,7 @@ class ModelConfig(BaseModel):
     d_ff: int
     n_heads: int
     n_layers: int
+    per_patch_action: bool = False
     eps: float = 1e-6
 
     @property
@@ -41,6 +42,7 @@ class TrainingConfig(BaseModel):
 
 MODELS: dict[str, ModelConfig] = {
     "base": ModelConfig(d_model=512, d_ff=2048, n_heads=16, n_layers=6),
+    "base-pp": ModelConfig(d_model=512, d_ff=2048, n_heads=16, n_layers=6, per_patch_action=True),
     "tiny": ModelConfig(d_state=32, patch_grid=4, d_model=64, d_ff=256, n_heads=4, n_layers=2),
 }
 

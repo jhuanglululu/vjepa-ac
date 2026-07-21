@@ -83,6 +83,8 @@ run's checkpoint directory; delete the directory to start fresh.
 **Model**
 - `tiny` — smoke runs and shape checks on a small synthetic grid, never real results
 - `base` — the paper-scale predictor for the vjepa2-vitl 16x16x1024 latent grid
+- `base-pp` — base with the action embedding added to every patch token (per-patch
+  injection), so conditioning does not compete for attention against 256 content tokens
 
 **Training**
 - `smoke` — 50-step local sanity check on synthetic linear-dynamics data, stride 2

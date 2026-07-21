@@ -132,6 +132,8 @@ class Predictor(nn.Module):
 
         s = self.state_embed(states)
         a = self.action_embed(actions).unsqueeze(2)
+        if self.config.per_patch_action:
+            s = s + a
         x = torch.cat([s, a], dim=-2).reshape(B, -1, self.d_model)
 
         mask = block_causal_mask(T, P, device=s.device)
