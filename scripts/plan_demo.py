@@ -90,11 +90,11 @@ def main():
     flat_ep = ep_tokens.reshape(len(ep_tokens), -1)
 
     s0 = a0 + args.start
-    goal = min(s0 + args.goal_offset, b0 - 1)
+    goal = max(a0, min(s0 + args.goal_offset, b0 - 1))
     goal_tok = ep_tokens[goal - a0]
     print(
         f"episode [{a0},{b0}) len {b0 - a0} | start {s0} (+{args.start}) | "
-        f"goal {goal} (goal is {goal - s0} frames ahead) | context {args.context} real frames | "
+        f"goal {goal} (goal is {goal - s0:+d} frames from start) | context {args.context} real frames | "
         f"replan horizon {args.horizon} strided steps ({args.horizon * stride} frames) | "
         f"snap {args.snap} | commit {args.commit_steps} action(s)"
         + (" | RANDOM-PLAN CONTROL" if args.random_plan else "")
