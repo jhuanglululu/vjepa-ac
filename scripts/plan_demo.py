@@ -99,6 +99,14 @@ def main():
         f"snap {args.snap} | commit {args.commit_steps} action(s)"
         + (" | RANDOM-PLAN CONTROL" if args.random_plan else "")
     )
+    req = cache.states[goal] - cache.states[s0]
+    req[3:6] = torch.remainder(req[3:6] + math.pi, 2 * math.pi) - math.pi
+    per = max(1, abs(goal - s0) // stride)
+    print(
+        f"required motion start->goal: dxyz ({req[0]:+.3f},{req[1]:+.3f},{req[2]:+.3f}) "
+        f"drpy ({req[3]:+.3f},{req[4]:+.3f},{req[5]:+.3f}) | goal grip {cache.states[goal, 6]:.2f} | "
+        f"per-stride-step avg dxyz ({req[0] / per:+.4f},{req[1] / per:+.4f},{req[2] / per:+.4f})"
+    )
 
     def executed_features(i, j):
         delta = cond.delta_cumsum[j] - cond.delta_cumsum[i]
