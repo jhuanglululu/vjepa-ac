@@ -28,6 +28,7 @@ def parse_args():
     p.add_argument("--commit-steps", type=int, default=1)
     p.add_argument("--snap", choices=["both", "state", "latent"], default="both")
     p.add_argument("--state-topk", type=int, default=8)
+    p.add_argument("--snap-range", type=int, nargs=2, default=None)
     p.add_argument("--forward-only", action="store_true")
     p.add_argument("--gain", default="auto")
     p.add_argument("--action-momentum", type=float, default=0.0)
@@ -186,14 +187,23 @@ def main():
             pred = forward(s, af)
             s[0, t + 1] = s[0, t] + pred[0, t]
         imagined = s[0, C - 1] + gain * (s[0, -1] - s[0, C - 1])
-        lo = (ctx_frames[-1] + 1 - a0) if args.forward_only else 0
-        if lo >= len(flat_ep):
+        lo, hi = pool_bounds(ctx_frames[-1])
+        if lo >= hi:
             return None
-        d = torch.cdist(imagined.reshape(1, -1), flat_ep[lo:])[0]
+        d = torch.cdist(imagined.reshape(1, -1), flat_ep[lo:hi])[0]
         return a0 + lo + int(d.argmin())
 
     def wrap(x):
         return torch.remainder(x + math.pi, 2 * math.pi) - math.pi
+
+    def pool_bounds(cur):
+        lo, hi = 0, b0 - a0
+        if args.snap_range is not None:
+            lo = max(lo, args.snap_range[0])
+            hi = min(hi, args.snap_range[1] + 1)
+        if args.forward_only:
+            lo = max(lo, cur + 1 - a0)
+        return lo, hi
 
     def step_state(ctx_frames, actions_seq):
         cur = ctx_frames[-1]
@@ -207,16 +217,16 @@ def main():
         grip_diff = ep_states[:, -1] - target_grip
         scale = ep_states.std(0).clamp(min=1e-3)
         d = ((diff / scale[:-1]) ** 2).sum(1) + (grip_diff / scale[-1]) ** 2
-        lo = (cur + 1 - a0) if args.forward_only else 0
-        if lo >= len(d):
+        lo, hi = pool_bounds(cur)
+        if lo >= hi:
             return None
         if args.snap == "state":
-            return a0 + lo + int(d[lo:].argmin())
+            return a0 + lo + int(d[lo:hi].argmin())
         d[cur - a0] = torch.inf
-        k = min(args.state_topk, int(torch.isfinite(d[lo:]).sum()))
+        k = min(args.state_topk, int(torch.isfinite(d[lo:hi]).sum()))
         if k == 0:
             return None
-        cand = d[lo:].topk(k, largest=False).indices + lo
+        cand = d[lo:hi].topk(k, largest=False).indices + lo
         cur_flat = flat_ep[cur - a0].reshape(1, -1)
         dl = torch.cdist(cur_flat, flat_ep[cand.to(device)])[0]
         return a0 + int(cand[int(dl.argmin())])
