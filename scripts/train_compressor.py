@@ -16,27 +16,23 @@ from vjepa_ac.schedule import make_scheduler
 from vjepa_ac.variations import MODELS
 
 
+MODEL = "base-c16"
+STEPS = 3000
+WARMUP = 100
+LR = 1e-3
+WEIGHT_DECAY = 1e-4
+BATCH_SIZE = 128
+RECON_WEIGHT = 0.1
+EVAL_EVERY = 500
+EVAL_PAIRS = 4096
+VAL_FRAC = 0.1
+RIDGE = 1e-3
+
+
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument(
-        "--model",
-        default="base-c16",
-        choices=sorted(k for k, m in MODELS.items() if m.compressor),
-    )
     p.add_argument("--stride", type=int, default=6)
-    p.add_argument("--steps", type=int, default=3000)
-    p.add_argument("--warmup", type=int, default=100)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--batch-size", type=int, default=128)
-    p.add_argument("--recon-weight", type=float, default=0.1)
-    p.add_argument("--eval-every", type=int, default=500)
-    p.add_argument("--eval-pairs", type=int, default=4096)
-    p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--ridge", type=float, default=1e-3)
-    p.add_argument("--cache-dir", default=None)
-    p.add_argument("--device", default=None)
     return p.parse_args()
 
 
@@ -63,22 +59,22 @@ def motion_r2(pred, y):
 
 def main():
     args = parse_args()
-    mc = MODELS[args.model]
-    device = args.device or get_device()
+    mc = MODELS[MODEL]
+    device = get_device()
     s = args.stride
     torch.manual_seed(args.seed)
 
-    cache = data.load_cache(args.cache_dir)
+    cache = data.load_cache()
     lat = cache.latents
     shape = lat.get_shape() if hasattr(lat, "get_shape") else lat.shape
     assert (shape[1], shape[2]) == (mc.comp_patches, mc.comp_d_latent)
-    train_eps, val_eps = data.split_episodes(cache.episodes, args.val_frac)
+    train_eps, val_eps = data.split_episodes(cache.episodes, VAL_FRAC)
     cond = data.fit_conditioner(cache.states, train_eps, s)
     train_idx = pair_starts(train_eps, s)
-    val_idx = subsample(pair_starts(val_eps, s), args.eval_pairs, 1)
+    val_idx = subsample(pair_starts(val_eps, s), EVAL_PAIRS, 1)
     print(
-        f"{args.model} phase 1 | stride {s} | {len(train_idx)} train / {len(val_idx)} val pairs | "
-        f"tokens {mc.n_patches}x{mc.d_state} | recon weight {args.recon_weight} | {device}"
+        f"{MODEL} phase 1 | stride {s} | {len(train_idx)} train / {len(val_idx)} val pairs | "
+        f"tokens {mc.n_patches}x{mc.d_state} | recon weight {RECON_WEIGHT} | {device}"
     )
 
     def gather_z(idx):
@@ -92,14 +88,14 @@ def main():
     idh = IDHead(mc.d_state, cache.state_dim).to(device)
     recon = ReconHead(mc.comp_d_latent, mc.comp_patches, mc.d_state, mc.comp_heads).to(device)
     params = [p for m in (comp, idh, recon) for p in m.parameters()]
-    optim = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
-    sched = make_scheduler(optim, args.warmup, args.steps)
+    optim = torch.optim.AdamW(params, lr=LR, weight_decay=WEIGHT_DECAY)
+    sched = make_scheduler(optim, WARMUP, STEPS)
     n_params = sum(p.numel() for p in params)
     print(f"parameters: {n_params:,} (incl. throwaway recon head)")
 
     training_name = f"comp-s{s}"
-    record = RecordWriter(args.model, training_name, args.seed)
-    record.meta(args.model, training_name, args.seed, {"phase1": vars(args)})
+    record = RecordWriter(MODEL, training_name, args.seed)
+    record.meta(MODEL, training_name, args.seed, {"phase1": vars(args)})
 
     @torch.no_grad()
     def evaluate():
@@ -118,21 +114,21 @@ def main():
         return r2, per_dim, sum(stds) / len(stds)
 
     best: Any = None
-    for step in tqdm(range(1, args.steps + 1), desc="phase 1", unit="step"):
-        bi = train_idx[torch.randint(0, len(train_idx), (args.batch_size,))]
+    for step in tqdm(range(1, STEPS + 1), desc="phase 1", unit="step"):
+        bi = train_idx[torch.randint(0, len(train_idx), (BATCH_SIZE,))]
         z0 = gather_z(bi)
         c0 = comp(z0)
         c1 = comp(gather_z(bi + s))
         id_loss = F.mse_loss(idh(c0, c1), targets(bi))
         recon_loss = F.smooth_l1_loss(recon(c0), z0)
-        loss = id_loss + args.recon_weight * recon_loss
+        loss = id_loss + RECON_WEIGHT * recon_loss
         optim.zero_grad(set_to_none=True)
         loss.backward()
         optim.step()
         sched.step()
         if step % 100 == 0:
             record.step(step, loss.item(), float(sched.get_last_lr()[0]), 0.0, 0.0)
-        if step % args.eval_every == 0 or step == args.steps:
+        if step % EVAL_EVERY == 0 or step == STEPS:
             r2, per_dim, tok_std = evaluate()
             record.eval(step, -r2, loss.item())
             tqdm.write(
@@ -153,7 +149,7 @@ def main():
     idh.load_state_dict(best["idh"])
     comp.eval()
 
-    out_dir = checkpoint_dir(args.model, training_name, args.seed)
+    out_dir = checkpoint_dir(MODEL, training_name, args.seed)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "compressor.safetensors"
     tensors = {f"compressor.{k}": v for k, v in best["comp"].items()}
@@ -162,7 +158,7 @@ def main():
     with open(out_path.with_suffix(".json"), "w") as f:
         json.dump(
             {
-                "model": args.model,
+                "model": MODEL,
                 "stride": s,
                 "seed": args.seed,
                 "phase1": vars(args),
@@ -195,7 +191,7 @@ def main():
             d = (tokens_flat(bi + s) - tokens_flat(bi)) / t_sd
             xtx += (x.T @ x).double()
             xty += x.T @ d
-        reg = args.ridge * len(tr) * torch.eye(k, device=device, dtype=torch.float64)
+        reg = RIDGE * len(tr) * torch.eye(k, device=device, dtype=torch.float64)
         w = torch.linalg.solve(xtx + reg, xty.double()).float()
         w_drift = torch.zeros_like(w)
         w_drift[-1] = w[-1]
@@ -224,12 +220,13 @@ def main():
     )
     if best["r2"] >= 0.2 and ceiling >= 2:
         print(
-            f"\nboth gates pass -> uv run scripts/train.py --model {args.model} "
+            f"\nboth gates pass -> uv run scripts/train.py --model {MODEL} "
             f"--training c-full --seed {args.seed} --no-rollout"
         )
     else:
         print(
-            "\ngate failed -- iterate on phase 1 (--recon-weight, --steps, --lr) before "
+            "\ngate failed -- iterate on phase 1 (RECON_WEIGHT, STEPS, LR at the top of "
+            "this script) before "
             "spending phase-2 GPU time"
         )
 

@@ -10,41 +10,42 @@ from vjepa_ac.schedule import make_scheduler
 from vjepa_ac.variations import MODELS, TRAININGS
 
 
+MODEL = "base"
+WINDOWS = 512
+STEPS = 3000
+WARMUP = 50
+LR = 3e-4
+EVAL_EVERY = 500
+EVAL_WINDOWS = 256
+
+
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="base", choices=sorted(MODELS))
     p.add_argument("--stride", type=int, default=6)
-    p.add_argument("--windows", type=int, default=1024)
-    p.add_argument("--steps", type=int, default=600)
-    p.add_argument("--warmup", type=int, default=50)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--eval-every", type=int, default=200)
-    p.add_argument("--eval-windows", type=int, default=256)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--cache-dir", default=None)
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    mc = MODELS[args.model]
+    mc = MODELS[MODEL]
     tc = TRAININGS["full"]
     device = get_device()
     device_type = device.split(":")[0]
     amp = tc.amp and device_type == "cuda"
 
-    cache = data.load_cache(args.cache_dir)
+    cache = data.load_cache()
     assert cache.state_dim == mc.d_action
     train_eps, _ = data.split_episodes(cache.episodes, tc.val_frac)
     starts_all = data.window_starts(train_eps, tc.T, args.stride)
     g = torch.Generator().manual_seed(args.seed)
-    n_sub = min(args.windows, len(starts_all))
+    n_sub = min(WINDOWS, len(starts_all))
     sub = starts_all[torch.randperm(len(starts_all), generator=g)[:n_sub]]
-    eval_starts = sub[: min(args.eval_windows, n_sub)]
+    eval_starts = sub[: min(EVAL_WINDOWS, n_sub)]
     cond = data.fit_conditioner(cache.states, train_eps, args.stride)
     micro = max(1, tc.batch_size // tc.grad_accum)
     print(
-        f"{n_sub} fixed train windows | stride {args.stride} | {args.steps} steps | "
+        f"{n_sub} fixed train windows | stride {args.stride} | {STEPS} steps | "
         f"batch {tc.batch_size} (micro {micro}) | eval on {len(eval_starts)} windows | {device}"
     )
 
@@ -89,13 +90,13 @@ def main():
         torch.manual_seed(args.seed)
         model = Predictor(mc, tc.T).to(device)
         optim = torch.optim.AdamW(
-            model.parameters(), lr=args.lr, betas=tc.betas, weight_decay=tc.weight_decay
+            model.parameters(), lr=LR, betas=tc.betas, weight_decay=tc.weight_decay
         )
-        sched = make_scheduler(optim, args.warmup, args.steps)
+        sched = make_scheduler(optim, WARMUP, STEPS)
         samp = torch.Generator().manual_seed(args.seed + 1)
         model.train()
         history = []
-        for step in range(1, args.steps + 1):
+        for step in range(1, STEPS + 1):
             idx = torch.randint(0, n_sub, (tc.batch_size,), generator=samp)
             optim.zero_grad(set_to_none=True)
             for i in range(0, tc.batch_size, micro):
@@ -106,7 +107,7 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), tc.grad_clip)
             optim.step()
             sched.step()
-            if step % args.eval_every == 0 or step == args.steps:
+            if step % EVAL_EVERY == 0 or step == STEPS:
                 model.eval()
                 lt = eval_loss(model, "true")
                 ls = eval_loss(model, "shuf")
@@ -148,8 +149,8 @@ def main():
         )
     else:
         print(
-            "model never fit the subset (copy ratio >= 0.8) -- raise --steps or --lr "
-            "before reading anything into the action numbers"
+            "model never fit the subset (copy ratio >= 0.8) -- raise STEPS or LR at the "
+            "top of this script before reading anything into the action numbers"
         )
 
 

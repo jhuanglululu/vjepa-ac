@@ -27,7 +27,7 @@ Optional env vars (all paths, with defaults): `VJEPA_CACHE_DIR`
 (`./latent_cache`), `VJEPA_CKPT_DIR` (`./checkpoints`), `VJEPA_RECORDS_DIR`
 (`./records`).
 
-Local machine can run: pytest, ruff/pyrefly, `--training smoke`, export.
+Local machine can run: pytest, ruff/pyrefly, `--training smoke`.
 Remote box (GPU + cache) is needed for: prepare_cache, check_actions,
 gate_sweep/stride_gate, ceiling_probe/overfit_check, real training,
 evaluate, plan_demo.
@@ -42,10 +42,9 @@ uv run scripts/check_actions.py --cache-dir latent_cache/wrist # 4. remote: conf
 uv run scripts/gate_sweep.py --seeds 1                         # 5. remote: stride gate on every camera, one free GPU each
 uv run scripts/stride_gate.py --cache-dir latent_cache/wrist   # 5b. single-camera gate (full 3 seeds)
 uv run scripts/ceiling_probe.py --stride 6                     # 6. remote: action-attributable share of latent deltas
-uv run scripts/train_compressor.py --model base-c16 --stride 6 # 7. remote: phase-1 compressor + gates
+uv run scripts/train_compressor.py --stride 6                  # 7. remote: phase-1 compressor + gates
 uv run scripts/train.py --model base-c16 --training c-full --seed 0 --no-rollout  # 8. remote: compressed-space training
 uv run scripts/evaluate.py --checkpoint checkpoints/base-c16/c-full-noroll/0/current.safetensors  # 9.
-uv run scripts/export.py --checkpoint checkpoints/base-c16/c-full-noroll/0/current.safetensors    # 10. weights-only
 uv run scripts/overfit_check.py --stride 6                     # optional: action-use A/B diagnostic
 uv run scripts/plan_demo.py --checkpoint checkpoints/base-c16/c-full/0/current.safetensors  # MPC demo + gif
 ```
@@ -55,8 +54,10 @@ from `checkpoints/<model>/comp-s<stride>/<seed>/compressor.safetensors`
 (override with `--compressor`), fine-tunes it at `compressor_lr` with
 stop-grad targets and the inverse-dynamics auxiliary (`id_weight`), and logs
 a collapse monitor (val token std + ID loss) at every val interval. The
-phase-2 checkpoint bundles compressor and predictor, so evaluate.py and
-export.py work on it unchanged.
+phase-2 checkpoint bundles compressor and predictor, so evaluate.py works on
+it unchanged. train_compressor.py, stride_gate.py, and overfit_check.py take
+only `--stride`/`--seed`(`--seeds`) — their remaining knobs are constants at
+the top of each script.
 
 prepare_cache.py downloads only the shards covering the requested episodes
 and writes one cache per camera under `latent_cache/<cam>/`; every consumer
@@ -114,8 +115,7 @@ New variation = new entry there and a line here, in the same change.
 
 - `records/<model>/<training>/<seed>/record.jsonl` — meta line + per-step/eval metrics
 - `checkpoints/<model>/<training>/<seed>/` — `<step>.safetensors` (+ `<step>.json`
-  sidecar), `current.*` for resume, 3 best by val loss kept, `model.safetensors`
-  from export
+  sidecar), `current.*` for resume, 3 best by val loss kept
 - `latent_cache/<cam>/` — `latents.safetensors` + `cache.json` per camera from prepare_cache
 - `records/diagnostics/` — stride_gate/gate_sweep output
 

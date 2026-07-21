@@ -21,25 +21,24 @@ HEAD_BLOCKS = 2
 MIN_TRAIN_R2 = 0.5
 
 
+STEPS = 3000
+WARMUP = 100
+EVAL_EVERY = 500
+BATCH_SIZE = 256
+LR = 1e-3
+WEIGHT_DECAY = 1e-4
+VAL_FRAC = 0.2
+EVAL_PAIRS = 4096
+BOOTSTRAP = 200
+THRESHOLD = 0.2
+MARGIN = 0.1
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--strides", type=int, nargs="+", default=[1, 2, 3, 4, 6, 8])
-    p.add_argument("--steps", type=int, default=3000)
-    p.add_argument("--warmup", type=int, default=100)
-    p.add_argument("--eval-every", type=int, default=500)
-    p.add_argument("--batch-size", type=int, default=256)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--val-frac", type=float, default=0.2)
-    p.add_argument("--eval-pairs", type=int, default=4096)
     p.add_argument("--seeds", type=int, default=3)
-    p.add_argument("--bootstrap", type=int, default=200)
-    p.add_argument("--threshold", type=float, default=0.2)
-    p.add_argument("--margin", type=float, default=0.1)
-    p.add_argument("--no-preload", action="store_true")
-    p.add_argument("--device", default=None)
     p.add_argument("--cache-dir", default=None)
-    p.add_argument("--out", default=None)
     return p.parse_args()
 
 
@@ -114,23 +113,22 @@ def bootstrap_stds(pair_preds, base_preds, ys_groups, n_boot, seed):
 
 def main():
     args = parse_args()
-    device = args.device or get_device()
+    device = get_device()
 
     cache = data.load_cache(args.cache_dir)
     camera = cache.meta.get("camera", "cache")
-    out_path = args.out or f"records/diagnostics/stride_gate_{camera}.json"
+    out_path = f"records/diagnostics/stride_gate_{camera}.json"
     latents = cache.latents
     N, P, D = latents.get_shape() if hasattr(latents, "get_shape") else latents.shape
-    train_eps, val_eps = data.split_episodes(cache.episodes, args.val_frac)
+    train_eps, val_eps = data.split_episodes(cache.episodes, VAL_FRAC)
 
     lat = None
-    if not args.no_preload:
-        try:
-            lat = latents[0:N].to(device)
-        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-            if "out of memory" not in str(e).lower():
-                raise
-            print("latents do not fit on device, falling back to mmap gathers")
+    try:
+        lat = latents[0:N].to(device)
+    except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+        if "out of memory" not in str(e).lower():
+            raise
+        print("latents do not fit on device, falling back to mmap gathers")
     print(
         f"camera: {camera} | {len(train_eps)} train / {len(val_eps)} val episodes | "
         f"target: normalized conditioning features (dim {cache.state_dim}) | "
@@ -173,7 +171,7 @@ def main():
         sel_idx = pair_starts(sel_eps, s)
         test_groups = [pair_starts([ep], s) for ep in test_eps]
         test_groups = [g for g in test_groups if len(g) > 0]
-        if len(train_idx) < args.batch_size or len(sel_idx) < 8 or len(test_groups) < 2:
+        if len(train_idx) < BATCH_SIZE or len(sel_idx) < 8 or len(test_groups) < 2:
             print(f"stride {s}: not enough pairs/episodes, skipping")
             continue
         cond = data.fit_conditioner(cache.states, train_eps, s)
@@ -181,8 +179,8 @@ def main():
         def targets(idx):
             return ((cond.features(idx, s) - cond.mean) / cond.std).to(device)
 
-        train_sub = subsample(train_idx, args.eval_pairs, 1)
-        sel_sub = subsample(sel_idx, args.eval_pairs, 2)
+        train_sub = subsample(train_idx, EVAL_PAIRS, 1)
+        sel_sub = subsample(sel_idx, EVAL_PAIRS, 2)
         ys_train = targets(train_sub).cpu()
         ys_sel = targets(sel_sub).cpu()
         ys_groups = [targets(g).cpu() for g in test_groups]
@@ -201,14 +199,12 @@ def main():
         def train_probe(seed, ablate):
             torch.manual_seed(2 * seed + int(ablate))
             probe = Probe(D, P, cache.state_dim).to(device)
-            optim = torch.optim.AdamW(
-                probe.parameters(), lr=args.lr, weight_decay=args.weight_decay
-            )
-            sched = make_scheduler(optim, args.warmup, args.steps)
+            optim = torch.optim.AdamW(probe.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+            sched = make_scheduler(optim, WARMUP, STEPS)
             label = f"stride {s} seed {seed} {'z0-only' if ablate else 'pair'}"
             best: Any = None
-            for step in tqdm(range(1, args.steps + 1), desc=label, unit="step", leave=False):
-                bi = train_idx[torch.randint(0, len(train_idx), (args.batch_size,))]
+            for step in tqdm(range(1, STEPS + 1), desc=label, unit="step", leave=False):
+                bi = train_idx[torch.randint(0, len(train_idx), (BATCH_SIZE,))]
                 z0 = gather_z(bi)
                 z1 = z0 if ablate else gather_z(bi + s)
                 loss = ((probe(z0, z1) - targets(bi)) ** 2).mean()
@@ -216,7 +212,7 @@ def main():
                 loss.backward()
                 optim.step()
                 sched.step()
-                if step % args.eval_every == 0 or step == args.steps:
+                if step % EVAL_EVERY == 0 or step == STEPS:
                     probe.eval()
                     sel_m = motion_r2(batch_predict(probe, sel_sub, ablate), ys_sel)
                     if best is None or sel_m > best["sel"]:
@@ -236,7 +232,7 @@ def main():
             pair_m = motion_r2(torch.cat(pair["preds"]), y_all)
             base_m = motion_r2(torch.cat(base["preds"]), y_all)
             pair_bstd, margin_bstd = bootstrap_stds(
-                pair["preds"], base["preds"], ys_groups, args.bootstrap, seed
+                pair["preds"], base["preds"], ys_groups, BOOTSTRAP, seed
             )
             seed_rows.append(
                 {
@@ -269,7 +265,7 @@ def main():
         margin_se = math.sqrt(margin_ep_se**2 + margin_seed_se**2)
 
         full_windows = len(data.window_starts(cache.episodes, T_full, s))
-        passed = pair_point - pair_se >= args.threshold and margin_point - margin_se >= args.margin
+        passed = pair_point - pair_se >= THRESHOLD and margin_point - margin_se >= MARGIN
         probe_limited = train_point < MIN_TRAIN_R2
         rows.append(
             {
@@ -317,7 +313,7 @@ def main():
         pick = eligible[0]
         print(
             f"\nverdict: train at stride {pick['stride']} -- smallest where both "
-            f"pair R2 - SE >= {args.threshold} and margin - SE >= {args.margin} "
+            f"pair R2 - SE >= {THRESHOLD} and margin - SE >= {MARGIN} "
             f"(passing: {[r['stride'] for r in eligible]})\n"
             f"  uv run scripts/train.py --model base --training full --stride {pick['stride']}"
         )
@@ -328,7 +324,7 @@ def main():
             )
     else:
         print(
-            f"\nverdict: no usable stride (pair R2 - SE >= {args.threshold} and margin - SE >= {args.margin})"
+            f"\nverdict: no usable stride (pair R2 - SE >= {THRESHOLD} and margin - SE >= {MARGIN})"
         )
         blocked = [r["stride"] for r in rows if r["passed"] and r["full_T_windows"] == 0]
         failed = [r for r in rows if not r["passed"]]
@@ -359,14 +355,14 @@ def main():
         json.dump(
             {
                 "camera": camera,
-                "threshold": args.threshold,
-                "margin": args.margin,
-                "val_frac": args.val_frac,
-                "steps": args.steps,
-                "lr": args.lr,
-                "weight_decay": args.weight_decay,
+                "threshold": THRESHOLD,
+                "margin": MARGIN,
+                "val_frac": VAL_FRAC,
+                "steps": STEPS,
+                "lr": LR,
+                "weight_decay": WEIGHT_DECAY,
                 "seeds": args.seeds,
-                "bootstrap": args.bootstrap,
+                "bootstrap": BOOTSTRAP,
                 "sel_test_disjoint": disjoint,
                 "n_sel_episodes": len(sel_eps),
                 "n_test_episodes": len(test_eps),
