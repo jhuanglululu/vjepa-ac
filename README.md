@@ -44,9 +44,9 @@ uv run scripts/stride_gate.py --cache-dir latent_cache/wrist   # 5b. single-came
 uv run scripts/ceiling_probe.py --stride 6                     # 6. remote: action-attributable share of latent deltas
 uv run scripts/train_compressor.py --stride 6                  # 7. remote: phase-1 compressor + gates
 uv run scripts/train.py --model base-c16 --training c-full --seed 0 --no-rollout  # 8. remote: compressed-space training
-uv run scripts/evaluate.py --checkpoint checkpoints/base-c16/c-full-noroll/0/current.safetensors  # 9.
+uv run scripts/evaluate.py                                     # 9. defaults to weights/model.safetensors
+uv run scripts/plan_demo.py                                    # 10. MPC demo + gif, same default weights
 uv run scripts/overfit_check.py --stride 6                     # optional: action-use A/B diagnostic
-uv run scripts/plan_demo.py --checkpoint checkpoints/base-c16/c-full/0/current.safetensors  # MPC demo + gif
 ```
 
 For compressed-space models (`*-c*`) train.py loads the phase-1 compressor
@@ -116,6 +116,9 @@ New variation = new entry there and a line here, in the same change.
 - `records/<model>/<training>/<seed>/record.jsonl` — meta line + per-step/eval metrics
 - `checkpoints/<model>/<training>/<seed>/` — `<step>.safetensors` (+ `<step>.json`
   sidecar), `current.*` for resume, 3 best by val loss kept
+- `weights/` — `model.safetensors` + `model.json`: the trained seed-0 `base-c16`/`c-full`
+  model (weights + sidecar, committed to the repo); evaluate.py and plan_demo.py
+  default to it, so both run without any checkpoint path
 - `latent_cache/<cam>/` — `latents.safetensors` + `cache.json` per camera from prepare_cache
 - `records/diagnostics/` — stride_gate/gate_sweep output
 

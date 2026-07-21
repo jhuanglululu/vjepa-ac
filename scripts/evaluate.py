@@ -18,7 +18,7 @@ from vjepa_ac.variations import ModelConfig, TrainingConfig
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--checkpoint", default="weights/model.safetensors")
     p.add_argument("--windows", type=int, default=256)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--horizons", type=int, nargs="+", default=[1, 2, 4, 8, 15])

@@ -1,0 +1,69 @@
+{
+  "model": "base-c16",
+  "training": "c-full",
+  "seed": 0,
+  "step": 10000,
+  "val_loss": 0.038589305244386196,
+  "config": {
+    "model": {
+      "d_state": 384,
+      "patch_grid": 4,
+      "d_action": 7,
+      "d_model": 512,
+      "d_ff": 2048,
+      "n_heads": 16,
+      "n_layers": 6,
+      "per_patch_action": false,
+      "compressor": true,
+      "comp_patches": 256,
+      "comp_d_latent": 1024,
+      "comp_heads": 8,
+      "eps": 1e-06
+    },
+    "training": {
+      "lr": 0.0001,
+      "weight_decay": 0.001,
+      "betas": [
+        0.9,
+        0.95
+      ],
+      "grad_clip": 1.0,
+      "batch_size": 64,
+      "grad_accum": 2,
+      "T": 16,
+      "stride": 6,
+      "compressor_lr": 1e-05,
+      "id_weight": 1.0,
+      "warmup_steps": 300,
+      "total_steps": 10000,
+      "val_interval": 500,
+      "val_frac": 0.1,
+      "val_windows": 1024,
+      "rollout_loss": true,
+      "keep_ckpts": 3,
+      "log_interval": 100,
+      "amp": true,
+      "data": "cache"
+    }
+  },
+  "conditioning": {
+    "mean": [
+      0.001203005202114582,
+      -0.0006867205956950784,
+      -0.0020805976819247007,
+      0.0005844461848028004,
+      0.0012937478022649884,
+      0.0008495369693264365,
+      0.5368335247039795
+    ],
+    "std": [
+      0.016404787078499794,
+      0.0200142040848732,
+      0.025521421805024147,
+      0.10364295542240143,
+      0.05366832762956619,
+      0.10855624079704285,
+      0.4297914505004883
+    ]
+  }
+}

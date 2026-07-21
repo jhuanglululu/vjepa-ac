@@ -30,7 +30,7 @@ GIF_FPS = 3.0
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--checkpoint", default="weights/model.safetensors")
     p.add_argument("--episode", type=int, default=0)
     p.add_argument("--start", type=int, default=30)
     p.add_argument("--goal-offset", type=int, default=90)
