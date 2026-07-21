@@ -25,6 +25,8 @@ def parse_args():
     p.add_argument("--horizon", type=int, default=8)
     p.add_argument("--max-steps", type=int, default=25)
     p.add_argument("--goal-tol", type=int, default=3)
+    p.add_argument("--commit-steps", type=int, default=1)
+    p.add_argument("--any-direction", action="store_true")
     p.add_argument("--samples", type=int, default=512)
     p.add_argument("--elite", type=int, default=64)
     p.add_argument("--iters", type=int, default=4)
@@ -51,6 +53,7 @@ def main():
     tc = TrainingConfig(**sidecar["config"]["training"])
     stride = tc.stride
     assert args.context + args.horizon <= tc.T
+    assert args.commit_steps <= args.horizon
 
     cache = data.load_cache()
     cond = data.load_conditioner(cache.states, sidecar["conditioning"])
@@ -131,18 +134,26 @@ def main():
         return mu, best_e
 
     @torch.no_grad()
-    def step_once(ctx_frames, action):
+    def step_once(ctx_frames, actions_seq):
         C = len(ctx_frames)
+        k = len(actions_seq)
         ctx_tok = ep_tokens[[i - a0 for i in ctx_frames]]
-        s = ctx_tok[None].clone()
-        af = torch.zeros(1, C, cache.state_dim, device=device)
-        for k in range(C - 1):
-            af[0, k] = executed_features(ctx_frames[k], ctx_frames[k + 1])
-        af[0, C - 1] = action
-        pred = forward(s, af)
-        imagined = s[0, C - 1] + pred[0, C - 1]
-        d = torch.cdist(imagined.reshape(1, -1), flat_ep)[0]
-        return a0 + int(d.argmin())
+        s = torch.zeros(1, C + k, *ctx_tok.shape[1:], device=device)
+        s[0] = ctx_tok[-1]
+        s[0, :C] = ctx_tok
+        af = torch.zeros(1, C + k, cache.state_dim, device=device)
+        for i in range(C - 1):
+            af[0, i] = executed_features(ctx_frames[i], ctx_frames[i + 1])
+        af[0, C - 1 : C - 1 + k] = actions_seq
+        for t in range(C - 1, C + k - 1):
+            pred = forward(s, af)
+            s[0, t + 1] = s[0, t] + pred[0, t]
+        imagined = s[0, -1]
+        lo = 0 if args.any_direction else (ctx_frames[-1] + 1 - a0)
+        if lo >= len(flat_ep):
+            return None
+        d = torch.cdist(imagined.reshape(1, -1), flat_ep[lo:])[0]
+        return a0 + lo + int(d.argmin())
 
     committed = [s0]
     trace = []
@@ -154,7 +165,10 @@ def main():
             break
         ctx = committed[-args.context :]
         mu, best_e = cem_plan(ctx)
-        nxt = step_once(ctx, mu[0])
+        nxt = step_once(ctx, mu[: args.commit_steps])
+        if nxt is None:
+            print("episode end reached, stopping")
+            break
         phys = (mu[0].cpu() * cond.std + cond.mean).tolist()
         trace.append({"from": cur, "to": nxt, "energy": best_e, "action": phys})
         print(
