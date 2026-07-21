@@ -97,6 +97,64 @@ measurement:
 Training is window-based: T=16 frames at stride 6 (91-frame span), episode-
 level train/val split shared by every script, batch 64 with grad accumulation.
 
+## Demo process
+
+`plan_demo.py` runs the paper's goal-image planning loop without a robot, so
+the recorded episode has to stand in for the environment. The design rule
+throughout: the planner may look at the goal, but **execution may not
+reference the goal or the direction of time** — otherwise the demo
+manufactures its own success (a time-forward snap on a recorded trajectory
+reaches any future goal by construction).
+
+The loop, per committed step:
+
+1. **Plan** (paper-faithful CEM): sample action sequences over an 8-step
+   horizon from Gaussians re-initialized at N(0,1) each replan, roll them
+   through the world model from the real context, score by L1 between the
+   imagined final tokens and the goal frame's tokens, refit on the elites,
+   take the mean.
+2. **Execute** only the first `--commit-steps` actions, then **snap**: add
+   the commanded wrap-aware Δstate to the current frame's real proprio state
+   and commit the episode frame whose state is nearest (per-dim scaled,
+   angle-wrapped). This is the actuator; the world model is not consulted.
+3. **Re-ground**: the committed frame's real latent joins the context (last
+   4 real frames), with the **executed** motion between committed frames —
+   not the commanded action — as the context's action rows. Replan.
+
+What each mechanism is for:
+
+- **State snapping** solves the actuator problem. The model's own one-step
+  imagination is ~5x too conservative (smooth-L1 regression to the mean), so
+  using it as the environment stalls and, worse, tests the model against
+  itself. Kinematics on ground-truth proprio is model-independent, works in
+  any direction (backwards commits stay possible, so failure stays visible),
+  and mirrors a position-controlled robot tracking Δstate commands.
+- **`--commit-steps`** solves the granularity problem: one strided step's
+  displacement can be smaller than the state gap between adjacent frames,
+  which snaps back to the same frame and stalls; executing 2-3 planned
+  actions before snapping clears the spacing.
+- **`--snap-range LO HI`** solves pose aliasing. Proprio state does not see
+  the world, and a pour episode passes through nearly the same arm pose with
+  the cup on the table and again with the cup in the gripper — nearest-state
+  snapping happily teleports between those task phases. Windowing the snap
+  pool to a frame range excludes other phases; it mildly references the
+  goal's location in time, which is why it is a flag and not the default.
+- **`--action-momentum`** solves dithering. Paper-faithful CEM restarts from
+  zero mean every replan, so successive plans can reverse each other;
+  warm-starting the mean from the last **executed** action biases toward
+  continuing real motion. It references only the past — never the goal or
+  time direction — which is what keeps it honest (index-space momentum
+  would not be).
+- **Executed-vs-commanded bookkeeping** separates failure modes: the header
+  prints the required start->goal motion, and every step prints commanded vs
+  executed Δstate. Commanded agreeing with required while executed diverges
+  means the simulator (no frame along the path); commanded disagreeing with
+  required means the planner.
+
+Output: a per-step trace, a JSON of committed frames and actions, and a
+side-by-side gif (committed real frames vs the goal image) next to the
+checkpoint.
+
 ## Setup
 
 ```
