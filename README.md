@@ -40,12 +40,22 @@ uv run scripts/prepare_cache.py --episodes 100 --trim 15       # 3. remote: per-
 uv run scripts/check_actions.py --cache-dir latent_cache/wrist # 4. remote: confirm action/state semantics
 uv run scripts/gate_sweep.py --seeds 1                         # 5. remote: stride gate on every camera, one free GPU each
 uv run scripts/stride_gate.py --cache-dir latent_cache/wrist   # 5b. single-camera gate (full 3 seeds)
-VJEPA_CACHE_DIR=latent_cache/wrist \
-  uv run scripts/train.py --model base --training full --stride 4 --seed 0  # 6. remote: real training
-uv run scripts/evaluate.py --checkpoint checkpoints/base/full-s4/0/current.safetensors  # 7.
-uv run scripts/export.py --checkpoint checkpoints/base/full-s4/0/current.safetensors    # 8. weights-only file
+uv run scripts/ceiling_probe.py --stride 6                     # 6. remote: action-attributable share of latent deltas
+uv run scripts/train_compressor.py --model base-c16 --stride 6 # 7. remote: phase-1 compressor + gates
+uv run scripts/train.py --model base-c16 --training c-full --seed 0 --no-rollout  # 8. remote: compressed-space training
+uv run scripts/evaluate.py --checkpoint checkpoints/base-c16/c-full-noroll/0/current.safetensors  # 9.
+uv run scripts/export.py --checkpoint checkpoints/base-c16/c-full-noroll/0/current.safetensors    # 10. weights-only
 uv run scripts/probe.py --target dstate                        # optional: raw latent diagnostics
+uv run scripts/overfit_check.py --stride 6                     # optional: action-use A/B diagnostic
 ```
+
+For compressed-space models (`*-c*`) train.py loads the phase-1 compressor
+from `checkpoints/<model>/comp-s<stride>/<seed>/compressor.safetensors`
+(override with `--compressor`), fine-tunes it at `compressor_lr` with
+stop-grad targets and the inverse-dynamics auxiliary (`id_weight`), and logs
+a collapse monitor (val token std + ID loss) at every val interval. The
+phase-2 checkpoint bundles compressor and predictor, so evaluate.py and
+export.py work on it unchanged.
 
 prepare_cache.py downloads only the shards covering the requested episodes
 and writes one cache per camera under `latent_cache/<cam>/`; every consumer
@@ -82,13 +92,20 @@ run's checkpoint directory; delete the directory to start fresh.
 
 **Model**
 - `tiny` — smoke runs and shape checks on a small synthetic grid, never real results
+- `tiny-c` — tiny compressed-space twin for exercising the compressor path locally
 - `base` — the paper-scale predictor for the vjepa2-vitl 16x16x1024 latent grid
 - `base-pp` — base with the action embedding added to every patch token (per-patch
   injection), so conditioning does not compete for attention against 256 content tokens
+- `base-c16` — compressor (16 learned queries over the 256 patches, trained on inverse
+  dynamics + light reconstruction, then fine-tuned at `compressor_lr`) + predictor
+  operating entirely in the 16x384 token space; needs a phase-1 checkpoint from
+  train_compressor.py
 
 **Training**
 - `smoke` — 50-step local sanity check on synthetic linear-dynamics data, stride 2
-- `full` — 5k-step stride-1 recipe on the real latent cache
+- `full` — 3k-step recipe on the real latent cache (raw 4112-token sequences)
+- `c-full` — 10k-step stride-6 recipe for compressed-space models (272-token
+  sequences are ~15x cheaper per step); `compressor_lr` and `id_weight` live here
 
 Purpose only — the numbers live in `src/vjepa_ac/variations.py`.
 New variation = new entry there and a line here, in the same change.

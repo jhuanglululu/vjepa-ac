@@ -10,6 +10,7 @@ from tqdm.auto import tqdm
 
 from vjepa_ac import data
 from vjepa_ac.checkpoints import load_model_weights
+from vjepa_ac.cpredictor import CPredictor
 from vjepa_ac.device import get_device
 from vjepa_ac.predictor import Predictor
 from vjepa_ac.variations import ModelConfig, TrainingConfig
@@ -63,15 +64,25 @@ def main():
         f"T {T} | stride {stride}"
     )
 
-    model = Predictor(mc, T).to(device).eval()
+    model_cls = CPredictor if mc.compressor else Predictor
+    model = model_cls(mc, T).to(device).eval()
     model.load_state_dict(load_model_weights(args.checkpoint))
-    print(f"loaded {args.checkpoint}")
+    print(f"loaded {args.checkpoint}" + (" (token space)" if mc.compressor else ""))
 
     def forward(states, acts):
         if device.startswith("cuda"):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 return model(states, acts).float()
         return model(states, acts).float()
+
+    @torch.no_grad()
+    def to_space(z):
+        if not isinstance(model, CPredictor):
+            return z
+        if device.startswith("cuda"):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                return model.encode(z).float()
+        return model.encode(z).float()
 
     @torch.no_grad()
     def rollout(z, a):
@@ -91,7 +102,7 @@ def main():
         best_d, best_i = float("inf"), a0
         for i in range(a0, b0, 256):
             j = min(i + 256, b0)
-            chunk = cache.latents[i:j].to(device).float().reshape(j - i, -1)
+            chunk = to_space(cache.latents[i:j].to(device).float()).reshape(j - i, -1)
             d = torch.cdist(q, chunk)[0]
             m = int(d.argmin())
             if float(d[m]) < best_d:
@@ -107,6 +118,7 @@ def main():
     for i in tqdm(range(0, len(eval_starts), args.batch_size), desc="eval", unit="batch"):
         sb = eval_starts[i : i + args.batch_size]
         z, a = data.gather(cache, cond, sb, T, stride, device)
+        z = to_space(z)
         B = len(sb)
         preds = {
             "model": rollout(z, a),

@@ -65,7 +65,11 @@ def synthetic_cache(config: ModelConfig, seed: int = 0) -> LatentCache:
     gen = torch.Generator().manual_seed(seed)
     n_episodes, ep_len = 6, 16
     n = n_episodes * ep_len
-    P, D, A = config.n_patches, config.d_state, config.d_action
+    if config.compressor:
+        P, D = config.comp_patches, config.comp_d_latent
+    else:
+        P, D = config.n_patches, config.d_state
+    A = config.d_action
 
     actions = torch.rand(n, A, generator=gen) * 2 - 1
     dynamics = torch.randn(A, P * D, generator=gen) * 0.2

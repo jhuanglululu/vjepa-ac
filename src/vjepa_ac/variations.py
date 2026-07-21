@@ -12,6 +12,10 @@ class ModelConfig(BaseModel):
     n_heads: int
     n_layers: int
     per_patch_action: bool = False
+    compressor: bool = False
+    comp_patches: int = 256
+    comp_d_latent: int = 1024
+    comp_heads: int = 8
     eps: float = 1e-6
 
     @property
@@ -28,6 +32,8 @@ class TrainingConfig(BaseModel):
     grad_accum: int = 1
     T: int
     stride: int = 1
+    compressor_lr: float = 1e-5
+    id_weight: float = 1.0
     warmup_steps: int
     total_steps: int
     val_interval: int
@@ -43,10 +49,44 @@ class TrainingConfig(BaseModel):
 MODELS: dict[str, ModelConfig] = {
     "base": ModelConfig(d_model=512, d_ff=2048, n_heads=16, n_layers=6),
     "base-pp": ModelConfig(d_model=512, d_ff=2048, n_heads=16, n_layers=6, per_patch_action=True),
+    "base-c16": ModelConfig(
+        d_state=384,
+        patch_grid=4,
+        d_model=512,
+        d_ff=2048,
+        n_heads=16,
+        n_layers=6,
+        compressor=True,
+    ),
     "tiny": ModelConfig(d_state=32, patch_grid=4, d_model=64, d_ff=256, n_heads=4, n_layers=2),
+    "tiny-c": ModelConfig(
+        d_state=16,
+        patch_grid=2,
+        d_model=64,
+        d_ff=256,
+        n_heads=4,
+        n_layers=2,
+        compressor=True,
+        comp_patches=16,
+        comp_d_latent=32,
+        comp_heads=4,
+    ),
 }
 
 TRAININGS: dict[str, TrainingConfig] = {
+    "c-full": TrainingConfig(
+        lr=1e-4,
+        batch_size=64,
+        grad_accum=2,
+        T=16,
+        stride=6,
+        warmup_steps=300,
+        total_steps=10000,
+        val_interval=500,
+        val_windows=1024,
+        log_interval=100,
+        amp=True,
+    ),
     "full": TrainingConfig(
         lr=1e-4,
         batch_size=64,
