@@ -351,13 +351,3 @@ New variation = new entry there and a line here, in the same change.
   default to it, so both run without any checkpoint path
 - `latent_cache/<cam>/` — `latents.safetensors` + `cache.json` per camera from prepare_cache
 - `records/diagnostics/` — stride_gate/gate_sweep output
-
-## Notes
-
-- Train/val split is episode-level (`data.split_episodes`, seed 0), shared by
-  train.py, evaluate.py, stride_gate.py, and the diagnostics; a smaller
-  val_frac holds out a subset of a larger one's episodes, so probes and
-  training agree on what is unseen.
-- Checkpoints must use the `model.`-prefixed tensor layout and carry a JSON
-  sidecar; pre-restructure checkpoints no longer load, and caches without
-  states must be rebuilt with prepare_cache.py.
