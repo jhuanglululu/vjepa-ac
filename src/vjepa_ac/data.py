@@ -20,12 +20,16 @@ CAMERAS = {
 IMG_SIZE = 256
 SPLIT_SEED = 0
 
-CACHE_DIR = os.environ.get("VJEPA_CACHE_DIR", "./latent_cache")
+CACHE_ROOT = "latent_cache"
+CAMERA = "ext1"
 
 
-def cache_paths(cache_dir: str | None = None) -> tuple[str, str]:
-    d = cache_dir or CACHE_DIR
-    return os.path.join(d, "latents.safetensors"), os.path.join(d, "cache.json")
+def camera_cache_dir(camera: str) -> str:
+    return CACHE_ROOT if camera == CAMERA else os.path.join(CACHE_ROOT, camera)
+
+
+def cache_paths(cache_dir: str) -> tuple[str, str]:
+    return os.path.join(cache_dir, "latents.safetensors"), os.path.join(cache_dir, "cache.json")
 
 
 @dataclass
@@ -39,8 +43,8 @@ class LatentCache:
     meta: dict = field(default_factory=dict)
 
 
-def load_cache(cache_dir: str | None = None) -> LatentCache:
-    latents_path, meta_path = cache_paths(cache_dir)
+def load_cache(camera: str = CAMERA) -> LatentCache:
+    latents_path, meta_path = cache_paths(camera_cache_dir(camera))
     assert os.path.exists(latents_path), (
         f"no latent cache at {latents_path} -- run scripts/prepare_cache.py first"
     )

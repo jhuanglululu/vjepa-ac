@@ -39,77 +39,62 @@ class TrainingConfig(BaseModel):
     val_frac: float = 0.1
     val_windows: int
     rollout_loss: bool = True
-    keep_ckpts: int = 3
     log_interval: int
     amp: bool
     data: Literal["cache", "synthetic"] = "cache"
 
 
-MODELS: dict[str, ModelConfig] = {
-    "base": ModelConfig(d_model=512, d_ff=2048, n_heads=16, n_layers=6),
-    "base-c16": ModelConfig(
-        d_state=384,
-        patch_grid=4,
-        d_model=512,
-        d_ff=2048,
-        n_heads=16,
-        n_layers=6,
-        compressor=True,
-    ),
-    "tiny": ModelConfig(d_state=32, patch_grid=4, d_model=64, d_ff=256, n_heads=4, n_layers=2),
-    "tiny-c": ModelConfig(
-        d_state=16,
-        patch_grid=2,
-        d_model=64,
-        d_ff=256,
-        n_heads=4,
-        n_layers=2,
-        compressor=True,
-        comp_patches=16,
-        comp_d_latent=32,
-        comp_heads=4,
-    ),
-}
+SEED = 0
 
-TRAININGS: dict[str, TrainingConfig] = {
-    "c-full": TrainingConfig(
-        lr=1e-4,
-        batch_size=64,
-        grad_accum=2,
-        T=16,
-        stride=6,
-        warmup_steps=300,
-        total_steps=10000,
-        val_interval=500,
-        val_windows=1024,
-        log_interval=100,
-        amp=True,
-    ),
-    "full": TrainingConfig(
-        lr=1e-4,
-        batch_size=64,
-        grad_accum=8,
-        T=16,
-        warmup_steps=300,
-        total_steps=3000,
-        val_interval=500,
-        val_windows=1024,
-        log_interval=100,
-        amp=True,
-    ),
-    "smoke": TrainingConfig(
-        lr=1e-3,
-        batch_size=8,
-        grad_accum=2,
-        T=4,
-        stride=2,
-        warmup_steps=10,
-        total_steps=50,
-        val_interval=25,
-        val_frac=0.2,
-        val_windows=16,
-        log_interval=1,
-        amp=False,
-        data="synthetic",
-    ),
-}
+MODEL = ModelConfig(
+    d_state=384,
+    patch_grid=4,
+    d_model=512,
+    d_ff=2048,
+    n_heads=16,
+    n_layers=6,
+    compressor=True,
+)
+
+TRAINING = TrainingConfig(
+    lr=1e-4,
+    batch_size=64,
+    grad_accum=2,
+    T=16,
+    stride=6,
+    warmup_steps=300,
+    total_steps=10000,
+    val_interval=500,
+    val_windows=1024,
+    log_interval=100,
+    amp=True,
+)
+
+SMOKE_MODEL = ModelConfig(
+    d_state=16,
+    patch_grid=2,
+    d_model=64,
+    d_ff=256,
+    n_heads=4,
+    n_layers=2,
+    compressor=True,
+    comp_patches=16,
+    comp_d_latent=32,
+    comp_heads=4,
+)
+
+SMOKE_TRAINING = TrainingConfig(
+    lr=1e-3,
+    batch_size=8,
+    grad_accum=2,
+    T=4,
+    stride=2,
+    warmup_steps=10,
+    total_steps=50,
+    val_interval=25,
+    val_frac=0.2,
+    val_windows=16,
+    log_interval=1,
+    amp=False,
+    data="synthetic",
+)

@@ -2,19 +2,25 @@ import argparse
 import json
 import math
 import os
+import random
 import sys
 from pathlib import Path
 
 import torch
 
 from vjepa_ac import data
-from vjepa_ac.checkpoints import load_model_weights
+from vjepa_ac.checkpoints import CURRENT_PATH, load_model_weights
 from vjepa_ac.cpredictor import CPredictor
 from vjepa_ac.device import get_device
-from vjepa_ac.predictor import Predictor
-from vjepa_ac.variations import ModelConfig, TrainingConfig
+from vjepa_ac.records import RECORDS_ROOT
+from vjepa_ac.variations import SEED, ModelConfig, TrainingConfig
 
 
+CHECKPOINT = str(CURRENT_PATH)
+START = 30
+GOAL_OFFSET = 90
+COMMIT_STEPS = 6
+SNAP_RANGE = (30, 150)
 CONTEXT = 4
 HORIZON = 8
 MAX_STEPS = 25
@@ -30,46 +36,45 @@ GIF_FPS = 3.0
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default="weights/model.safetensors")
-    p.add_argument("--episode", type=int, default=0)
-    p.add_argument("--start", type=int, default=30)
-    p.add_argument("--goal-offset", type=int, default=90)
-    p.add_argument("--commit-steps", type=int, default=1)
-    p.add_argument("--snap-range", type=int, nargs=2, default=None)
-    p.add_argument("--action-momentum", type=float, default=0.0)
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--device", default=None)
-    p.add_argument("--out", default=None)
+    p.add_argument("--episode", type=int, default=None)
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    device = args.device or get_device()
-    torch.manual_seed(args.seed)
+    device = get_device()
 
-    sidecar_path = Path(args.checkpoint).with_suffix(".json")
+    assert os.path.exists(CHECKPOINT), (
+        f"no checkpoint at {CHECKPOINT} -- run scripts/train.py first"
+    )
+    sidecar_path = Path(CHECKPOINT).with_suffix(".json")
     with open(sidecar_path) as f:
         sidecar = json.load(f)
     mc = ModelConfig(**sidecar["config"]["model"])
     tc = TrainingConfig(**sidecar["config"]["training"])
     stride = tc.stride
+    assert mc.compressor
     assert CONTEXT + HORIZON <= tc.T
-    assert args.commit_steps <= HORIZON
+    assert COMMIT_STEPS <= HORIZON
 
     cache = data.load_cache()
     cond = data.load_conditioner(cache.states, sidecar["conditioning"])
     _, val_eps = data.split_episodes(cache.episodes, tc.val_frac)
-    a0, b0 = val_eps[args.episode % len(val_eps)]
+    if args.episode is None:
+        valid = [i for i, (a, b) in enumerate(val_eps) if b - a > START + GOAL_OFFSET]
+        assert valid, f"no held-out episode longer than {START + GOAL_OFFSET} frames"
+        episode = random.choice(valid)
+        print(f"picked episode {episode} of {len(val_eps)} held-out episodes")
+    else:
+        episode = args.episode % len(val_eps)
+    a0, b0 = val_eps[episode]
+    torch.manual_seed(SEED)
 
-    model_cls = CPredictor if mc.compressor else Predictor
-    model = model_cls(mc, tc.T).to(device).eval()
-    model.load_state_dict(load_model_weights(args.checkpoint))
+    model = CPredictor(mc, tc.T).to(device).eval()
+    model.load_state_dict(load_model_weights(CHECKPOINT))
 
     @torch.no_grad()
     def to_space(z):
-        if not isinstance(model, CPredictor):
-            return z
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.startswith("cuda")):
             return model.encode(z).float()
 
@@ -84,14 +89,14 @@ def main():
         ep_tokens.append(to_space(cache.latents[i:j].to(device).float()))
     ep_tokens = torch.cat(ep_tokens)
 
-    s0 = a0 + args.start
-    goal = max(a0, min(s0 + args.goal_offset, b0 - 1))
+    s0 = a0 + START
+    goal = max(a0, min(s0 + GOAL_OFFSET, b0 - 1))
     goal_tok = ep_tokens[goal - a0]
     print(
-        f"episode [{a0},{b0}) len {b0 - a0} | start {s0} (+{args.start}) | "
+        f"episode [{a0},{b0}) len {b0 - a0} | start {s0} (+{START}) | "
         f"goal {goal} (goal is {goal - s0:+d} frames from start) | context {CONTEXT} real frames | "
         f"replan horizon {HORIZON} strided steps ({HORIZON * stride} frames) | "
-        f"commit {args.commit_steps} action(s)"
+        f"commit {COMMIT_STEPS} action(s)"
     )
     req = cache.states[goal] - cache.states[s0]
     req[3:6] = torch.remainder(req[3:6] + math.pi, 2 * math.pi) - math.pi
@@ -109,14 +114,12 @@ def main():
         return ((feats - cond.mean) / cond.std).to(device)
 
     @torch.no_grad()
-    def cem_plan(ctx_frames, last_action):
+    def cem_plan(ctx_frames):
         C = len(ctx_frames)
         H = HORIZON
         ctx_tok = ep_tokens[[i - a0 for i in ctx_frames]]
         ctx_act = [executed_features(ctx_frames[k], ctx_frames[k + 1]) for k in range(C - 1)]
         mu = torch.zeros(H, cache.state_dim, device=device)
-        if args.action_momentum > 0 and last_action is not None:
-            mu = args.action_momentum * last_action.expand(H, -1).clone()
         sigma = torch.full((H, cache.state_dim), ACTION_STD, device=device)
         best_e = math.inf
         for _ in range(ITERS):
@@ -149,10 +152,8 @@ def main():
         return torch.remainder(x + math.pi, 2 * math.pi) - math.pi
 
     def pool_bounds():
-        lo, hi = 0, b0 - a0
-        if args.snap_range is not None:
-            lo = max(lo, args.snap_range[0])
-            hi = min(hi, args.snap_range[1] + 1)
+        lo = max(0, SNAP_RANGE[0])
+        hi = min(b0 - a0, SNAP_RANGE[1] + 1)
         return lo, hi
 
     def step_state(ctx_frames, actions_seq):
@@ -175,22 +176,21 @@ def main():
     committed = [s0]
     trace = []
     stuck = 0
-    last_action = None
     while len(trace) < MAX_STEPS:
         cur = committed[-1]
         if abs(cur - goal) <= GOAL_TOL:
             print(f"reached goal tolerance at frame {cur} ({cur - goal:+d} from goal)")
             break
         ctx = committed[-CONTEXT:]
-        mu, best_e = cem_plan(ctx, last_action)
-        nxt = step_state(ctx, mu[: args.commit_steps])
+        mu, best_e = cem_plan(ctx)
+        nxt = step_state(ctx, mu[:COMMIT_STEPS])
         if nxt is None:
             print("episode end reached, stopping")
             break
-        last_action = executed_features(cur, nxt)
-        feats = mu[: args.commit_steps].cpu() * cond.std + cond.mean
+        executed = executed_features(cur, nxt)
+        feats = mu[:COMMIT_STEPS].cpu() * cond.std + cond.mean
         cmd = feats[:, :-1].sum(0).tolist() + [float(feats[-1, -1])]
-        ex = (last_action.cpu() * cond.std + cond.mean).tolist()
+        ex = (executed.cpu() * cond.std + cond.mean).tolist()
         trace.append({"from": cur, "to": nxt, "energy": best_e, "commanded": cmd, "executed": ex})
         print(
             f"step {len(trace):>3} | frame {cur} -> {nxt} ({nxt - cur:+d}) | "
@@ -213,18 +213,18 @@ def main():
         f"start) | goal {goal} ({goal - s0:+d}) | miss {abs(final - goal)} frames"
     )
 
-    out = args.out or os.path.join(
-        os.path.dirname(args.checkpoint) or ".", f"plan_ep{args.episode}_g{goal - s0}.gif"
-    )
+    RECORDS_ROOT.mkdir(parents=True, exist_ok=True)
+    out = str(RECORDS_ROOT / f"plan_ep{episode}_g{goal - s0}.gif")
     with open(Path(out).with_suffix(".json"), "w") as f:
         json.dump(
             {
-                "checkpoint": args.checkpoint,
+                "checkpoint": CHECKPOINT,
+                "episode": episode,
                 "episode_range": [a0, b0],
                 "start": s0,
                 "goal": goal,
                 "stride": stride,
-                "commit_steps": args.commit_steps,
+                "commit_steps": COMMIT_STEPS,
                 "committed": committed,
                 "trace": trace,
             },

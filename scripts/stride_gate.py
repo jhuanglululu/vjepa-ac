@@ -1,8 +1,8 @@
-import argparse
 import json
 import math
 import os
 import statistics
+import sys
 from typing import Any
 
 import torch
@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 from vjepa_ac import data
 from vjepa_ac.device import get_device
 from vjepa_ac.schedule import make_scheduler
-from vjepa_ac.variations import TRAININGS
+from vjepa_ac.variations import TRAINING
 
 D_MODEL = 768
 N_HEADS = 8
@@ -33,13 +33,10 @@ BOOTSTRAP = 200
 THRESHOLD = 0.2
 MARGIN = 0.1
 
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--strides", type=int, nargs="+", default=[1, 2, 3, 4, 6, 8])
-    p.add_argument("--seeds", type=int, default=3)
-    p.add_argument("--cache-dir", default=None)
-    return p.parse_args()
+CONFIRM_STRIDES = (4, 6)
+CONFIRM_SEEDS = 3
+SWEEP_STRIDES = (1, 2, 3, 4, 6, 8)
+SWEEP_SEEDS = 1
 
 
 class MlpBlock(nn.Module):
@@ -111,11 +108,10 @@ def bootstrap_stds(pair_preds, base_preds, ys_groups, n_boot, seed):
     return statistics.stdev(pair_samples), statistics.stdev(margin_samples)
 
 
-def main():
-    args = parse_args()
+def main(camera=data.CAMERA, strides=CONFIRM_STRIDES, seeds=CONFIRM_SEEDS):
     device = get_device()
 
-    cache = data.load_cache(args.cache_dir)
+    cache = data.load_cache(camera)
     camera = cache.meta.get("camera", "cache")
     out_path = f"records/diagnostics/stride_gate_{camera}.json"
     latents = cache.latents
@@ -155,7 +151,7 @@ def main():
         sel_eps, test_eps = val_eps[0::2], val_eps[1::2]
         print(
             f"{len(sel_eps)} selection / {len(test_eps)} test episodes (disjoint) | "
-            f"{args.seeds} seeds x (pair + z0-only) probes per stride"
+            f"{seeds} seeds x (pair + z0-only) probes per stride"
         )
     else:
         sel_eps = test_eps = val_eps
@@ -164,9 +160,9 @@ def main():
             "scores are optimistic"
         )
 
-    T_full = TRAININGS["full"].T
+    T_full = TRAINING.T
     rows: list[dict[str, Any]] = []
-    for s in sorted(args.strides):
+    for s in sorted(strides):
         train_idx = pair_starts(train_eps, s)
         sel_idx = pair_starts(sel_eps, s)
         test_groups = [pair_starts([ep], s) for ep in test_eps]
@@ -226,7 +222,7 @@ def main():
             return best
 
         seed_rows: list[dict[str, Any]] = []
-        for seed in range(args.seeds):
+        for seed in range(seeds):
             pair = train_probe(seed, ablate=False)
             base = train_probe(seed, ablate=True)
             pair_m = motion_r2(torch.cat(pair["preds"]), y_all)
@@ -293,7 +289,7 @@ def main():
 
     print(
         f"\n=== motion extractable from latent pairs, beyond z0 alone "
-        f"({args.seeds} seeds, bootstrap over {len(test_eps)} test episodes) ==="
+        f"({seeds} seeds, bootstrap over {len(test_eps)} test episodes) ==="
     )
     print(
         f"{'stride':>6} | {'pair test R2':>14} | {'z0-only':>8} | {'margin':>14} | "
@@ -315,7 +311,7 @@ def main():
             f"\nverdict: train at stride {pick['stride']} -- smallest where both "
             f"pair R2 - SE >= {THRESHOLD} and margin - SE >= {MARGIN} "
             f"(passing: {[r['stride'] for r in eligible]})\n"
-            f"  uv run scripts/train.py --model base --training full --stride {pick['stride']}"
+            f"  set TRAINING.stride = {pick['stride']} in src/vjepa_ac/variations.py if it differs"
         )
         if pick["full_T_windows"] < 5000:
             print(
@@ -361,7 +357,7 @@ def main():
                 "steps": STEPS,
                 "lr": LR,
                 "weight_decay": WEIGHT_DECAY,
-                "seeds": args.seeds,
+                "seeds": seeds,
                 "bootstrap": BOOTSTRAP,
                 "sel_test_disjoint": disjoint,
                 "n_sel_episodes": len(sel_eps),
@@ -376,4 +372,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1:
+        main(
+            camera=sys.argv[1],
+            seeds=int(sys.argv[2]) if len(sys.argv) > 2 else SWEEP_SEEDS,
+            strides=[int(s) for s in sys.argv[3:]] or SWEEP_STRIDES,
+        )
+    else:
+        main()

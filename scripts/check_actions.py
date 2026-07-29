@@ -1,15 +1,10 @@
-import argparse
 import math
 
 import torch
 
 from vjepa_ac import data
 
-p = argparse.ArgumentParser()
-p.add_argument("--cache-dir", default=None)
-args = p.parse_args()
-
-cache = data.load_cache(args.cache_dir)
+cache = data.load_cache()
 print(
     f"dataset {cache.meta.get('dataset')} [{cache.meta.get('split')}] | "
     f"camera {cache.meta.get('camera')} | trim {cache.meta.get('trim')} | "

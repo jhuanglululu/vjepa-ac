@@ -1,4 +1,3 @@
-import argparse
 import copy
 import json
 import os
@@ -16,20 +15,14 @@ from transformers import AutoModel, AutoVideoProcessor
 
 from vjepa_ac import data
 from vjepa_ac.device import get_device, pick_free_gpus
-from vjepa_ac.variations import TRAININGS
+from vjepa_ac.variations import TRAINING
 
 FPS = 15
 DECODE_BATCH = 32
+EPISODES = 100
+TRIM = 15
 STATE_COLS = ["observation.state.cartesian_position", "observation.state.gripper_position"]
 ACTION_COLS = ["action.cartesian_velocity", "action.gripper_position"]
-
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--episodes", type=int, default=100)
-    p.add_argument("--trim", type=int, default=15)
-    p.add_argument("--cameras", nargs="+", default=list(data.CAMERAS), choices=list(data.CAMERAS))
-    return p.parse_args()
 
 
 def hub_file(path):
@@ -271,7 +264,7 @@ def build_camera_cache(short, plan, rows, trim, encoders, enc_devices, means, st
     pbar.close()
     assert off == n_frames
 
-    out_dir = os.path.join(data.CACHE_DIR, short)
+    out_dir = data.camera_cache_dir(short)
     os.makedirs(out_dir, exist_ok=True)
     latents_path, meta_path = data.cache_paths(out_dir)
     save_file({"latents": latents, "actions": actions, "state": states}, latents_path)
@@ -294,23 +287,21 @@ def build_camera_cache(short, plan, rows, trim, encoders, enc_devices, means, st
             f,
         )
     print(f"saved {n_frames} frame latents ({len(episodes)} episodes) -> {latents_path}")
-    tc = TRAININGS["full"]
-    return check_health(latents, actions, episodes, tc.T, tc.stride)
+    return check_health(latents, actions, episodes, TRAINING.T, TRAINING.stride)
 
 
 if __name__ == "__main__":
-    args = parse_args()
     free_gpus = pick_free_gpus()
     enc_devices = [f"cuda:{g}" for g in free_gpus[:4]] or [get_device()]
     print(f"encoding on: {enc_devices}")
 
-    plan, dropped = load_plan(args.episodes, args.trim)
+    plan, dropped = load_plan(EPISODES, TRIM)
     print(
-        f"{data.DATASET_ID} [{data.DATASET_SPLIT}]: first {args.episodes} episodes, "
-        f"trim {args.trim} -> {len(plan)} kept, {dropped} dropped (too short), "
-        f"{sum(e['length'] - args.trim for e in plan)} frames per camera"
+        f"{data.DATASET_ID} [{data.DATASET_SPLIT}]: first {EPISODES} episodes, "
+        f"trim {TRIM} -> {len(plan)} kept, {dropped} dropped (too short), "
+        f"{sum(e['length'] - TRIM for e in plan)} frames per camera"
     )
-    rows = load_rows(plan, args.trim)
+    rows = load_rows(plan, TRIM)
 
     m = AutoModel.from_pretrained(data.HF_REPO)
     processor = AutoVideoProcessor.from_pretrained(data.HF_REPO)
@@ -321,10 +312,8 @@ if __name__ == "__main__":
     del m, base_enc
 
     healthy = True
-    for short in args.cameras:
-        healthy &= build_camera_cache(
-            short, plan, rows, args.trim, encoders, enc_devices, means, stds
-        )
+    for short in data.CAMERAS:
+        healthy &= build_camera_cache(short, plan, rows, TRIM, encoders, enc_devices, means, stds)
     print(
         "now run: uv run scripts/gate_sweep.py"
         if healthy

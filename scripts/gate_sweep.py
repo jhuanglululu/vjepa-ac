@@ -5,16 +5,19 @@ import subprocess
 import sys
 import time
 
+import stride_gate
+
 from vjepa_ac import data
 from vjepa_ac.device import pick_free_gpus
+
+MAX_GPUS = 4
 
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--cameras", nargs="+", default=list(data.CAMERAS), choices=list(data.CAMERAS))
-    p.add_argument("--seeds", type=int, default=1)
-    p.add_argument("--strides", type=int, nargs="+", default=None)
-    p.add_argument("--max-gpus", type=int, default=4)
+    p.add_argument("--strides", type=int, nargs="+", default=list(stride_gate.SWEEP_STRIDES))
+    p.add_argument("--seeds", type=int, default=stride_gate.SWEEP_SEEDS)
     return p.parse_args()
 
 
@@ -32,26 +35,19 @@ def tail_status(log):
 
 def main():
     args = parse_args()
-    gpus = pick_free_gpus()[: args.max_gpus]
+    cameras = args.cameras
+    gpus = pick_free_gpus()[:MAX_GPUS]
     assert gpus, "no free GPUs found"
-    print(f"free GPUs: {gpus} | cameras: {args.cameras} | seeds {args.seeds}")
+    print(f"free GPUs: {gpus} | cameras: {cameras} | strides {args.strides} | seeds {args.seeds}")
 
     jobs = []
-    for cam in args.cameras:
-        cache_dir = os.path.join(data.CACHE_DIR, cam)
+    for cam in cameras:
+        cache_dir = data.camera_cache_dir(cam)
         assert os.path.exists(os.path.join(cache_dir, "cache.json")), (
             f"no cache for camera {cam} at {cache_dir} -- run scripts/prepare_cache.py first"
         )
-        cmd = [
-            sys.executable,
-            "scripts/stride_gate.py",
-            "--cache-dir",
-            cache_dir,
-            "--seeds",
-            str(args.seeds),
-        ]
-        if args.strides:
-            cmd += ["--strides"] + [str(s) for s in args.strides]
+        cmd = [sys.executable, "scripts/stride_gate.py", cam, str(args.seeds)]
+        cmd += [str(s) for s in args.strides]
         jobs.append((cam, cmd))
 
     os.makedirs("records/diagnostics", exist_ok=True)
@@ -86,7 +82,7 @@ def main():
                     print("".join(f.readlines()[-15:]))
 
     print("\n=== combined verdicts ===")
-    for cam in args.cameras:
+    for cam in cameras:
         path = f"records/diagnostics/stride_gate_{cam}.json"
         if not os.path.exists(path):
             print(f"{cam}: no result file")

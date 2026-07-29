@@ -3,7 +3,9 @@ import math
 import torch
 
 from vjepa_ac import data
-from vjepa_ac.variations import MODELS
+from vjepa_ac.variations import ModelConfig
+
+TINY = ModelConfig(d_state=32, patch_grid=4, d_model=64, d_ff=256, n_heads=4, n_layers=2)
 
 
 def test_window_starts_stride_one():
@@ -39,7 +41,7 @@ def test_split_episodes_smaller_frac_is_subset():
 
 
 def test_synthetic_cache_shapes_and_dynamics():
-    cfg = MODELS["tiny"]
+    cfg = TINY
     cache = data.synthetic_cache(cfg, seed=0)
     n = sum(b - a for a, b in cache.episodes)
     assert tuple(cache.latents.shape) == (n, cfg.n_patches, cfg.d_state)
@@ -53,7 +55,7 @@ def test_synthetic_cache_shapes_and_dynamics():
 
 
 def test_synthetic_cache_states_track_actions():
-    cache = data.synthetic_cache(MODELS["tiny"], seed=0)
+    cache = data.synthetic_cache(TINY, seed=0)
     for a, b in cache.episodes:
         assert torch.equal(cache.states[a], torch.zeros(cache.state_dim))
         assert torch.allclose(
@@ -102,7 +104,7 @@ def test_fit_conditioner_skips_episode_boundaries():
 
 
 def test_conditioner_stats_roundtrip():
-    cache = data.synthetic_cache(MODELS["tiny"], seed=0)
+    cache = data.synthetic_cache(TINY, seed=0)
     cond = data.fit_conditioner(cache.states, cache.episodes[:4], stride=2)
     cond2 = data.load_conditioner(cache.states, cond.stats())
     starts = torch.tensor([0, 5])
@@ -110,7 +112,7 @@ def test_conditioner_stats_roundtrip():
 
 
 def test_gather_strided_frames_and_zero_last_action():
-    cfg = MODELS["tiny"]
+    cfg = TINY
     cache = data.synthetic_cache(cfg, seed=0)
     cond = data.fit_conditioner(cache.states, cache.episodes, stride=2)
     starts = torch.tensor([0, 3])

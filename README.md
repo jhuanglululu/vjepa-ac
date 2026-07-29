@@ -115,15 +115,14 @@ control. Execution never uses the goal frame's time index or assumes that the
 next frame is later in the recording. This prevents a future goal from being
 reached automatically.
 
-Useful controls:
+The demo runs on a random held-out episode by default; `--episode N` picks a
+specific one. Two fixed settings (constants at the top of the script) matter:
 
-- `--commit-steps` combines 2-3 actions when one action is too small to reach a
-  different recorded state.
-- `--snap-range LO HI` limits frame selection when the same arm pose appears in
-  different task stages. Because this uses time-range knowledge, it is not the
-  default.
-- `--action-momentum` reduces back-and-forth plans using only the last executed
-  action.
+- 6 planned actions are combined per commit, because one action is often too
+  small to reach a different recorded state.
+- Frame selection is limited to frames 30-150 of the episode, because the same
+  arm pose appears in different task stages. This uses time-range knowledge, so
+  the demo is a controlled illustration rather than a fully blind rollout.
 
 The trace compares required, commanded, and executed motion. A good command
 but bad execution points to missing states in the recording; a bad command
@@ -136,42 +135,46 @@ uv sync                 # tests and CPU smoke runs
 uv sync --extra cache   # cache building, evaluation GIFs, and GPU runs
 
 uv run pytest
-uv run scripts/train.py --model tiny --training smoke
+uv run scripts/train.py --smoke   # CPU check on synthetic data, saves nothing
 ```
 
-After preparing a latent cache with the full workflow below:
+After preparing a latent cache and training with the full workflow below:
 
 ```bash
-uv run scripts/evaluate.py       # uses weights/model.safetensors
-uv run scripts/plan_demo.py      # uses the same weights and cache
+uv run scripts/evaluate.py       # uses checkpoints/current.safetensors
+uv run scripts/plan_demo.py      # uses the same checkpoint and cache
 ```
 
-Optional path settings: `VJEPA_CACHE_DIR` (default `./latent_cache`),
-`VJEPA_CKPT_DIR` (`./checkpoints`), and `VJEPA_RECORDS_DIR` (`./records`).
+Scripts take no arguments and read no environment variables. Every setting is
+a named constant: the model and training recipe in `src/vjepa_ac/variations.py`
+and per-script knobs at the top of each script. The only flags are
+`train.py --smoke`, `plan_demo.py --episode N`, and optional
+`--cameras/--strides/--seeds` on the rarely rerun `gate_sweep.py`.
 
 ## Full workflow
 
 Run the scripts in this order:
 
 ```bash
-# 1. Download episodes and cache V-JEPA features for each camera
-uv run scripts/prepare_cache.py --episodes 100 --trim 15
+# 1. Download the first 100 episodes and cache V-JEPA features for each camera
+uv run scripts/prepare_cache.py
 
 # 2. Confirm action/state meanings
-uv run scripts/check_actions.py --cache-dir latent_cache/wrist
+uv run scripts/check_actions.py
 
-# 3. Choose the camera and frame stride
-uv run scripts/gate_sweep.py --seeds 1
-uv run scripts/stride_gate.py --cache-dir latent_cache/ext1 --strides 4 6
+# 3. Screen every camera and stride (1 seed each), then confirm the chosen
+#    camera at strides 4 and 6 with 3 seeds
+uv run scripts/gate_sweep.py
+uv run scripts/stride_gate.py
 
 # 4. Confirm that raw features have little action-predictable change
-uv run scripts/ceiling_probe.py --stride 6
+uv run scripts/ceiling_probe.py
 
 # 5. Train and validate the compressed token space
-uv run scripts/train_compressor.py --stride 6
+uv run scripts/train_compressor.py
 
 # 6. Train the action-conditioned predictor
-uv run scripts/train.py --model base-c16 --training c-full --seed 0
+uv run scripts/train.py
 
 # 7. Measure action use and rollout quality
 uv run scripts/evaluate.py
@@ -185,34 +188,29 @@ shuffled-action baselines, plus frame retrieval over time. Acceptance targets
 are shuffled-action error at least 10% worse at the longest horizon and a
 model/copy ratio no higher than 0.9.
 
-For deeper diagnosis, `overfit_check.py --stride 6` compares two raw-feature
-models trained on a fixed 512-window sample: one receives correct actions and
+For deeper diagnosis, `overfit_check.py` compares two raw-feature models
+trained on a fixed 512-window sample: one receives correct actions and
 one receives permanently shuffled actions. It distinguishes slow learning
 from a model that is structurally unable to use actions.
 
-## Configurations and outputs
+## Configuration and outputs
 
-Model configurations:
-
-- `tiny`: CPU smoke and shape checks on synthetic data.
-- `tiny-c`: CPU check of the compressed-token path.
-- `base`: raw-feature negative baseline.
-- `base-c16`: final 16 x 384 compressor and predictor; requires the stage-1
-  compressor checkpoint.
-
-Training configurations:
-
-- `smoke`: 50 synthetic steps at stride 2.
-- `full`: 3,000-step raw-feature baseline.
-- `c-full`: 10,000-step compressed-token recipe at stride 6.
-
-Exact values live in `src/vjepa_ac/variations.py`.
+`src/vjepa_ac/variations.py` holds the single training recipe: `MODEL` and
+`TRAINING` are the final 16 x 384 compressor-plus-predictor trained for 10,000
+steps at stride 6, and `SMOKE_MODEL`/`SMOKE_TRAINING` are the tiny synthetic
+configuration behind `train.py --smoke`. The raw-feature negative baseline
+survives only inside `overfit_check.py`.
 
 Main outputs:
 
-- `latent_cache/<camera>/`: cached features, state, actions, and episode ranges.
-- `checkpoints/<model>/<training>/<seed>/`: resumable and best checkpoints.
-- `records/<model>/<training>/<seed>/record.jsonl`: training/evaluation metrics.
+- `latent_cache/`: cached features, state, actions, and episode ranges for the
+  chosen camera (ext1); the other cameras from the sweep go to
+  `latent_cache/ext2/` and `latent_cache/wrist/`.
+- `checkpoints/`: `compressor.safetensors` from stage 1 and the predictor's
+  `current.safetensors` with its `current.json` sidecar (config, conditioning
+  stats, latest validation loss), overwritten at every validation. Evaluation
+  and planning load these. Smoke runs save nothing.
+- `records/compressor.jsonl` and `records/train.jsonl`: training metrics.
+- `records/eval_results.json` and `records/plan_ep*_g*.gif`: evaluation and
+  planning outputs.
 - `records/diagnostics/`: camera, stride, and ceiling measurements.
-- `weights/model.safetensors` and `weights/model.json`: shipped final model and
-  settings used by evaluation and planning by default.

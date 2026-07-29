@@ -1,14 +1,9 @@
 import datetime
 import json
-import os
 import subprocess
 from pathlib import Path
 
-RECORDS_ROOT = Path(os.environ.get("VJEPA_RECORDS_DIR", "records"))
-
-
-def record_dir(model: str, training: str, seed: int) -> Path:
-    return RECORDS_ROOT / model / training / str(seed)
+RECORDS_ROOT = Path("records")
 
 
 def git_commit() -> str | None:
@@ -23,8 +18,8 @@ def git_commit() -> str | None:
 
 
 class RecordWriter:
-    def __init__(self, model: str, training: str, seed: int):
-        self.path = record_dir(model, training, seed) / "record.jsonl"
+    def __init__(self, name: str):
+        self.path = RECORDS_ROOT / f"{name}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._f = open(self.path, "a")
 
@@ -32,13 +27,11 @@ class RecordWriter:
         self._f.write(json.dumps(obj) + "\n")
         self._f.flush()
 
-    def meta(self, model: str, training: str, seed: int, config: dict) -> None:
+    def meta(self, name: str, config: dict) -> None:
         self.write(
             {
                 "type": "meta",
-                "model": model,
-                "training": training,
-                "seed": seed,
+                "name": name,
                 "config": config,
                 "git_commit": git_commit(),
                 "started": datetime.datetime.now().isoformat(timespec="seconds"),

@@ -1,23 +1,15 @@
-import argparse
-
 import torch
 import torch.nn.functional as F
 
 from vjepa_ac import data
 from vjepa_ac.device import get_device
+from vjepa_ac.variations import TRAINING
 
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--stride", type=int, default=6)
-    p.add_argument("--train-pairs", type=int, default=20000)
-    p.add_argument("--val-pairs", type=int, default=4096)
-    p.add_argument("--val-frac", type=float, default=0.1)
-    p.add_argument("--ridge", type=float, default=1e-3)
-    p.add_argument("--batch-size", type=int, default=256)
-    p.add_argument("--cache-dir", default=None)
-    p.add_argument("--device", default=None)
-    return p.parse_args()
+TRAIN_PAIRS = 20000
+VAL_PAIRS = 4096
+VAL_FRAC = 0.1
+RIDGE = 1e-3
+BATCH_SIZE = 256
 
 
 def pair_starts(episodes, stride):
@@ -35,15 +27,14 @@ def subsample(idx, n, seed):
 
 
 def main():
-    args = parse_args()
-    device = args.device or get_device()
-    cache = data.load_cache(args.cache_dir)
-    train_eps, val_eps = data.split_episodes(cache.episodes, args.val_frac)
-    cond = data.fit_conditioner(cache.states, train_eps, args.stride)
-    s = args.stride
+    device = get_device()
+    cache = data.load_cache()
+    s = TRAINING.stride
+    train_eps, val_eps = data.split_episodes(cache.episodes, VAL_FRAC)
+    cond = data.fit_conditioner(cache.states, train_eps, s)
 
-    train_idx = subsample(pair_starts(train_eps, s), args.train_pairs, 0)
-    val_idx = subsample(pair_starts(val_eps, s), args.val_pairs, 1)
+    train_idx = subsample(pair_starts(train_eps, s), TRAIN_PAIRS, 0)
+    val_idx = subsample(pair_starts(val_eps, s), VAL_PAIRS, 1)
     lat = cache.latents
     shape = lat.get_shape() if hasattr(lat, "get_shape") else lat.shape
     D_all = shape[1] * shape[2]
@@ -64,20 +55,20 @@ def main():
 
     xtx = torch.zeros(k, k, device=device, dtype=torch.float64)
     xty = torch.zeros(k, D_all, device=device)
-    for i in range(0, len(train_idx), args.batch_size):
-        bi = train_idx[i : i + args.batch_size]
+    for i in range(0, len(train_idx), BATCH_SIZE):
+        bi = train_idx[i : i + BATCH_SIZE]
         x = features(bi)
         xtx += (x.T @ x).double()
         xty += x.T @ deltas(bi)
-    reg = args.ridge * len(train_idx) * torch.eye(k, device=device, dtype=torch.float64)
+    reg = RIDGE * len(train_idx) * torch.eye(k, device=device, dtype=torch.float64)
     w = torch.linalg.solve(xtx + reg, xty.double()).float()
     w_drift = torch.zeros_like(w)
     w_drift[-1] = w[-1]
 
     losses = {"copy": 0.0, "drift": 0.0, "linear": 0.0}
     var_tot, var_res = 0.0, 0.0
-    for i in range(0, len(val_idx), args.batch_size):
-        bi = val_idx[i : i + args.batch_size]
+    for i in range(0, len(val_idx), BATCH_SIZE):
+        bi = val_idx[i : i + BATCH_SIZE]
         x = features(bi)
         d = deltas(bi)
         zero = torch.zeros_like(d)

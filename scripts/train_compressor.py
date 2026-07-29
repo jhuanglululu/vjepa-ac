@@ -1,4 +1,3 @@
-import argparse
 import json
 from typing import Any
 
@@ -7,16 +6,14 @@ import torch.nn.functional as F
 from safetensors.torch import save_file
 from tqdm.auto import tqdm
 
-from vjepa_ac import data
-from vjepa_ac.checkpoints import checkpoint_dir
+from vjepa_ac import checkpoints, data
 from vjepa_ac.compressor import Compressor, IDHead, ReconHead
 from vjepa_ac.device import get_device
 from vjepa_ac.records import RecordWriter
 from vjepa_ac.schedule import make_scheduler
-from vjepa_ac.variations import MODELS
+from vjepa_ac.variations import MODEL, SEED, TRAINING
 
 
-MODEL = "base-c16"
 STEPS = 3000
 WARMUP = 100
 LR = 1e-3
@@ -27,13 +24,6 @@ EVAL_EVERY = 500
 EVAL_PAIRS = 4096
 VAL_FRAC = 0.1
 RIDGE = 1e-3
-
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--stride", type=int, default=6)
-    p.add_argument("--seed", type=int, default=0)
-    return p.parse_args()
 
 
 def pair_starts(episodes, stride):
@@ -58,11 +48,10 @@ def motion_r2(pred, y):
 
 
 def main():
-    args = parse_args()
-    mc = MODELS[MODEL]
+    mc = MODEL
     device = get_device()
-    s = args.stride
-    torch.manual_seed(args.seed)
+    s = TRAINING.stride
+    torch.manual_seed(SEED)
 
     cache = data.load_cache()
     lat = cache.latents
@@ -73,7 +62,7 @@ def main():
     train_idx = pair_starts(train_eps, s)
     val_idx = subsample(pair_starts(val_eps, s), EVAL_PAIRS, 1)
     print(
-        f"{MODEL} phase 1 | stride {s} | {len(train_idx)} train / {len(val_idx)} val pairs | "
+        f"phase 1 | stride {s} | {len(train_idx)} train / {len(val_idx)} val pairs | "
         f"tokens {mc.n_patches}x{mc.d_state} | recon weight {RECON_WEIGHT} | {device}"
     )
 
@@ -93,9 +82,8 @@ def main():
     n_params = sum(p.numel() for p in params)
     print(f"parameters: {n_params:,} (incl. throwaway recon head)")
 
-    training_name = f"comp-s{s}"
-    record = RecordWriter(MODEL, training_name, args.seed)
-    record.meta(MODEL, training_name, args.seed, {"phase1": vars(args)})
+    record = RecordWriter("compressor")
+    record.meta("compressor", {"stride": s, "seed": SEED})
 
     @torch.no_grad()
     def evaluate():
@@ -149,19 +137,16 @@ def main():
     idh.load_state_dict(best["idh"])
     comp.eval()
 
-    out_dir = checkpoint_dir(MODEL, training_name, args.seed)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "compressor.safetensors"
+    out_path = checkpoints.COMPRESSOR_PATH
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     tensors = {f"compressor.{k}": v for k, v in best["comp"].items()}
     tensors |= {f"id_head.{k}": v for k, v in best["idh"].items()}
     save_file(tensors, str(out_path))
     with open(out_path.with_suffix(".json"), "w") as f:
         json.dump(
             {
-                "model": MODEL,
                 "stride": s,
-                "seed": args.seed,
-                "phase1": vars(args),
+                "seed": SEED,
                 "val_motion_r2": best["r2"],
                 "per_dim_r2": best["per_dim"],
                 "best_step": best["step"],
@@ -219,10 +204,7 @@ def main():
         f"(copy {copy:.4f} | drift {drift:.4f} | linear {lin:.4f})"
     )
     if best["r2"] >= 0.2 and ceiling >= 2:
-        print(
-            f"\nboth gates pass -> uv run scripts/train.py --model {MODEL} "
-            f"--training c-full --seed {args.seed} --no-rollout"
-        )
+        print("\nboth gates pass -> uv run scripts/train.py")
     else:
         print(
             "\ngate failed -- iterate on phase 1 (RECON_WEIGHT, STEPS, LR at the top of "

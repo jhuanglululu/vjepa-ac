@@ -1,4 +1,3 @@
-import argparse
 import bisect
 import json
 import os
@@ -9,29 +8,25 @@ import torch
 from tqdm.auto import tqdm
 
 from vjepa_ac import data
-from vjepa_ac.checkpoints import load_model_weights
+from vjepa_ac.checkpoints import CURRENT_PATH, load_model_weights
 from vjepa_ac.cpredictor import CPredictor
 from vjepa_ac.device import get_device
-from vjepa_ac.predictor import Predictor
+from vjepa_ac.records import RECORDS_ROOT
 from vjepa_ac.variations import ModelConfig, TrainingConfig
 
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default="weights/model.safetensors")
-    p.add_argument("--windows", type=int, default=256)
-    p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--horizons", type=int, nargs="+", default=[1, 2, 4, 8, 15])
-    p.add_argument("--device", default=None)
-    p.add_argument("--out", default=None)
-    return p.parse_args()
+CHECKPOINT = str(CURRENT_PATH)
+WINDOWS = 256
+BATCH_SIZE = 64
+HORIZONS = [1, 2, 4, 8, 15]
 
 
 def main():
-    args = parse_args()
-    device = args.device or get_device()
+    device = get_device()
 
-    sidecar_path = Path(args.checkpoint).with_suffix(".json")
+    assert os.path.exists(CHECKPOINT), (
+        f"no checkpoint at {CHECKPOINT} -- run scripts/train.py first"
+    )
+    sidecar_path = Path(CHECKPOINT).with_suffix(".json")
     assert sidecar_path.exists(), (
         f"no sidecar at {sidecar_path} -- evaluate needs the config and "
         "conditioning stats saved next to the checkpoint"
@@ -42,10 +37,9 @@ def main():
     mc = ModelConfig(**sidecar["config"]["model"])
     tc = TrainingConfig(**sidecar["config"]["training"])
     T, stride = tc.T, tc.stride
-    assert max(args.horizons) <= T - 1
-    out_path = args.out or os.path.join(
-        os.path.dirname(args.checkpoint) or ".", "eval_results.json"
-    )
+    assert mc.compressor
+    assert max(HORIZONS) <= T - 1
+    out_path = str(RECORDS_ROOT / "eval_results.json")
 
     cache = data.load_cache()
     assert cache.state_dim == mc.d_action
@@ -57,17 +51,16 @@ def main():
     val_starts = data.window_starts(val_eps, T, stride)
 
     gen = torch.Generator().manual_seed(1)
-    sel = torch.randperm(len(val_starts), generator=gen)[: args.windows]
+    sel = torch.randperm(len(val_starts), generator=gen)[:WINDOWS]
     eval_starts = val_starts[sel]
     print(
         f"evaluating {len(eval_starts)} windows from {len(val_eps)} held-out episodes | "
         f"T {T} | stride {stride}"
     )
 
-    model_cls = CPredictor if mc.compressor else Predictor
-    model = model_cls(mc, T).to(device).eval()
-    model.load_state_dict(load_model_weights(args.checkpoint))
-    print(f"loaded {args.checkpoint}" + (" (token space)" if mc.compressor else ""))
+    model = CPredictor(mc, T).to(device).eval()
+    model.load_state_dict(load_model_weights(CHECKPOINT))
+    print(f"loaded {CHECKPOINT} (token space)")
 
     def forward(states, acts):
         if device.startswith("cuda"):
@@ -77,8 +70,6 @@ def main():
 
     @torch.no_grad()
     def to_space(z):
-        if not isinstance(model, CPredictor):
-            return z
         if device.startswith("cuda"):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 return model.encode(z).float()
@@ -110,13 +101,13 @@ def main():
         return best_i
 
     variants = ["model", "zero_actions", "shuffled_actions"]
-    l1_sum = {v: {k: 0.0 for k in args.horizons} for v in variants + ["copy_first"]}
+    l1_sum = {v: {k: 0.0 for k in HORIZONS} for v in variants + ["copy_first"]}
     n_windows = 0
-    retr = {k: {"hits": 0, "offsets": []} for k in args.horizons}
-    copy_retr = {k: {"hits": 0, "offsets": []} for k in args.horizons}
+    retr = {k: {"hits": 0, "offsets": []} for k in HORIZONS}
+    copy_retr = {k: {"hits": 0, "offsets": []} for k in HORIZONS}
 
-    for i in tqdm(range(0, len(eval_starts), args.batch_size), desc="eval", unit="batch"):
-        sb = eval_starts[i : i + args.batch_size]
+    for i in tqdm(range(0, len(eval_starts), BATCH_SIZE), desc="eval", unit="batch"):
+        sb = eval_starts[i : i + BATCH_SIZE]
         z, a = data.gather(cache, cond, sb, T, stride, device)
         z = to_space(z)
         B = len(sb)
@@ -125,7 +116,7 @@ def main():
             "zero_actions": rollout(z, torch.zeros_like(a)),
             "shuffled_actions": rollout(z, torch.roll(a, 1, dims=0)),
         }
-        for k in args.horizons:
+        for k in HORIZONS:
             for v in variants:
                 l1_sum[v][k] += (preds[v][:, k] - z[:, k]).abs().mean(dim=(1, 2)).sum().item()
             l1_sum["copy_first"][k] += (z[:, 0] - z[:, k]).abs().mean(dim=(1, 2)).sum().item()
@@ -134,7 +125,7 @@ def main():
         for bi in range(B):
             s0 = int(sb[bi])
             a0, b0 = episode_of(s0)
-            for k in args.horizons:
+            for k in HORIZONS:
                 target = s0 + k * stride
                 ri = retrieve_frame(preds["model"][bi, k], a0, b0)
                 retr[k]["hits"] += int(ri == target)
@@ -143,21 +134,21 @@ def main():
                 copy_retr[k]["hits"] += int(ci == target)
                 copy_retr[k]["offsets"].append(ci - target)
 
-    l1 = {v: {k: l1_sum[v][k] / n_windows for k in args.horizons} for v in l1_sum}
+    l1 = {v: {k: l1_sum[v][k] / n_windows for k in HORIZONS} for v in l1_sum}
 
     print(f"\n=== rollout latent L1 vs ground truth ({n_windows} windows, stride {stride}) ===")
     print(
         f"{'h':>3} | {'copy-first':>10} | {'model':>10} | {'zero-act':>10} | "
         f"{'shuf-act':>10} | {'model/copy':>10}"
     )
-    for k in args.horizons:
+    for k in HORIZONS:
         print(
             f"{k:>3} | {l1['copy_first'][k]:>10.4f} | {l1['model'][k]:>10.4f} | "
             f"{l1['zero_actions'][k]:>10.4f} | {l1['shuffled_actions'][k]:>10.4f} | "
             f"{l1['model'][k] / max(l1['copy_first'][k], 1e-9):>10.3f}"
         )
 
-    kmax = max(args.horizons)
+    kmax = max(HORIZONS)
     sens = (l1["shuffled_actions"][kmax] - l1["model"][kmax]) / max(l1["model"][kmax], 1e-9)
     print(f"\naction sensitivity @h={kmax}: shuffled is {sens * 100:+.1f}% worse than true actions")
 
@@ -165,7 +156,7 @@ def main():
     print(
         f"{'h':>3} | {'top1 acc':>8} | {'med offset':>10} | {'copy top1':>9} | {'copy offset':>11}"
     )
-    for k in args.horizons:
+    for k in HORIZONS:
         mo = statistics.median(retr[k]["offsets"])
         co = statistics.median(copy_retr[k]["offsets"])
         print(
@@ -174,14 +165,11 @@ def main():
         )
 
     results = {
-        "checkpoint": args.checkpoint,
-        "model": sidecar.get("model"),
-        "training": sidecar.get("training"),
-        "seed": sidecar.get("seed"),
+        "checkpoint": CHECKPOINT,
         "stride": stride,
         "n_windows": n_windows,
-        "horizons": args.horizons,
-        "rollout_l1": {v: {str(k): l1[v][k] for k in args.horizons} for v in l1},
+        "horizons": HORIZONS,
+        "rollout_l1": {v: {str(k): l1[v][k] for k in HORIZONS} for v in l1},
         "action_sensitivity": {str(kmax): sens},
         "retrieval": {
             str(k): {
@@ -190,7 +178,7 @@ def main():
                 "copy_top1_acc": copy_retr[k]["hits"] / n_windows,
                 "copy_median_offset": statistics.median(copy_retr[k]["offsets"]),
             }
-            for k in args.horizons
+            for k in HORIZONS
         },
     }
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)

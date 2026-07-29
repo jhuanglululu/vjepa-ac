@@ -98,13 +98,13 @@ loss。
 不讀取目標幀的時間位置，也不假設下一幀一定在影片的後方，以免自動「走向未來」
 而製造成功結果。
 
-常用控制：
+Demo 預設隨機挑選一段未參與訓練的操作片段；`--episode N` 可指定特定片段。
+兩項固定設定（腳本頂端的常數）值得留意：
 
-- `--commit-steps`：當單一動作太小、無法切換到另一個已記錄狀態時，一次合併
-  2-3 個動作。
-- `--snap-range LO HI`：相同手臂姿勢出現在不同工作階段時，限制可選的畫面範圍。
-  因為它使用時間範圍資訊，所以不是預設行為。
-- `--action-momentum`：只參考上一個實際動作，減少規劃方向來回切換。
+- 每次 commit 合併 6 個規劃動作，因為單一動作常常太小、無法切換到另一個
+  已記錄狀態。
+- 可選畫面限制在片段的第 30-150 幀，因為相同手臂姿勢會出現在不同工作階段。
+  這用到了時間範圍資訊，所以此 demo 是受控的示範，而非完全盲測。
 
 輸出會比較目標所需、模型要求、環境實際執行的動作。要求正確但執行錯誤，通常
 代表錄影中缺少對應狀態；要求本身錯誤，則是規劃器的問題。
@@ -116,42 +116,45 @@ uv sync                 # 測試與 CPU 快速檢查
 uv sync --extra cache   # 建立快取、輸出 GIF 與 GPU 執行所需套件
 
 uv run pytest
-uv run scripts/train.py --model tiny --training smoke
+uv run scripts/train.py --smoke   # 在合成資料上做 CPU 檢查，不寫入任何檔案
 ```
 
-依下方完整流程準備特徵快取後：
+依下方完整流程準備特徵快取並完成訓練後：
 
 ```bash
-uv run scripts/evaluate.py       # 預設使用 weights/model.safetensors
-uv run scripts/plan_demo.py      # 使用同一份 weights 與快取
+uv run scripts/evaluate.py       # 使用 checkpoints/current.safetensors
+uv run scripts/plan_demo.py      # 使用同一份 checkpoint 與快取
 ```
 
-可選路徑設定：`VJEPA_CACHE_DIR`（預設 `./latent_cache`）、`VJEPA_CKPT_DIR`
-（`./checkpoints`）、`VJEPA_RECORDS_DIR`（`./records`）。
+所有腳本不需要參數，也不讀取環境變數。每項設定都是具名常數：模型與訓練
+設定在 `src/vjepa_ac/variations.py`，各腳本專屬的參數在腳本頂端。僅有的
+旗標是 `train.py --smoke`、`plan_demo.py --episode N`，以及較少重跑的
+`gate_sweep.py` 上可選的 `--cameras/--strides/--seeds`。
 
 ## 完整執行流程
 
 請依序執行：
 
 ```bash
-# 1. 下載資料，並建立各相機的 V-JEPA 特徵快取
-uv run scripts/prepare_cache.py --episodes 100 --trim 15
+# 1. 下載前 100 段資料，並建立各相機的 V-JEPA 特徵快取
+uv run scripts/prepare_cache.py
 
 # 2. 確認動作與狀態的意義
-uv run scripts/check_actions.py --cache-dir latent_cache/wrist
+uv run scripts/check_actions.py
 
-# 3. 選擇相機與取樣間隔
-uv run scripts/gate_sweep.py --seeds 1
-uv run scripts/stride_gate.py --cache-dir latent_cache/ext1 --strides 4 6
+# 3. 先掃描所有相機與 stride（各 1 個 seed），再以 3 個 seed
+#    確認選定相機在 stride 4 與 6 的表現
+uv run scripts/gate_sweep.py
+uv run scripts/stride_gate.py
 
 # 4. 確認動作幾乎無法直接預測原始特徵變化
-uv run scripts/ceiling_probe.py --stride 6
+uv run scripts/ceiling_probe.py
 
 # 5. 訓練並驗證壓縮 token 空間
-uv run scripts/train_compressor.py --stride 6
+uv run scripts/train_compressor.py
 
 # 6. 訓練 action-conditioned predictor
-uv run scripts/train.py --model base-c16 --training c-full --seed 0
+uv run scripts/train.py
 
 # 7. 評估動作敏感度與連續預測品質
 uv run scripts/evaluate.py
@@ -164,32 +167,25 @@ uv run scripts/plan_demo.py
 畫面在操作片段中的時間位置。通過標準為：最長預測距離下，打亂動作的誤差至少
 增加 10%，且模型／重複畫面的誤差比不高於 0.9。
 
-需要深入診斷時，可執行 `overfit_check.py --stride 6`。它在固定的 512 個 window
+需要深入診斷時，可執行 `overfit_check.py`。它在固定的 512 個 window
 上比較正確動作與永久打亂動作的兩個 raw-feature model，用來區分「學得慢」與
 「模型結構無法使用動作」。
 
 ## 設定與輸出
 
-模型設定：
-
-- `tiny`：在合成資料上執行 CPU 快速檢查。
-- `tiny-c`：在 CPU 檢查 compressed-token 流程。
-- `base`：raw-feature 失敗案例的 baseline。
-- `base-c16`：最終的 16 x 384 compressor 與 predictor；需要第一階段 checkpoint。
-
-訓練設定：
-
-- `smoke`：stride 2、50 步合成資料。
-- `full`：3,000 步 raw-feature baseline。
-- `c-full`：stride 6、10,000 步 compressed-token 設定。
-
-確切參數位於 `src/vjepa_ac/variations.py`。
+`src/vjepa_ac/variations.py` 只保留一組訓練設定：`MODEL` 與 `TRAINING` 是
+最終的 16 x 384 compressor 加 predictor，以 stride 6 訓練 10,000 步；
+`SMOKE_MODEL` 與 `SMOKE_TRAINING` 則是 `train.py --smoke` 使用的小型合成
+設定。Raw-feature 失敗案例的 baseline 只保留在 `overfit_check.py` 內。
 
 主要輸出：
 
-- `latent_cache/<camera>/`：快取特徵、狀態、動作與操作片段範圍。
-- `checkpoints/<model>/<training>/<seed>/`：可繼續訓練與表現最佳的 checkpoint。
-- `records/<model>/<training>/<seed>/record.jsonl`：訓練與評估數據。
+- `latent_cache/`：選定相機（ext1）的快取特徵、狀態、動作與操作片段範圍；
+  掃描用的其他相機存於 `latent_cache/ext2/` 與 `latent_cache/wrist/`。
+- `checkpoints/`：第一階段的 `compressor.safetensors`，以及 predictor 的
+  `current.safetensors` 與其 `current.json` sidecar（設定、conditioning 統計
+  與最新驗證 loss），每次驗證時覆寫。Evaluation 和 planning 載入這組檔案。
+  Smoke 執行不寫入任何檔案。
+- `records/compressor.jsonl`、`records/train.jsonl`：訓練數據。
+- `records/eval_results.json`、`records/plan_ep*_g*.gif`：評估與規劃輸出。
 - `records/diagnostics/`：相機、stride 與 ceiling 的診斷結果。
-- `weights/model.safetensors`、`weights/model.json`：專案附帶的最終模型與設定；
-  evaluation 和 planning 預設使用這組檔案。

@@ -1,5 +1,3 @@
-import argparse
-
 import torch
 import torch.nn.functional as F
 
@@ -7,10 +5,22 @@ from vjepa_ac import data
 from vjepa_ac.device import get_device
 from vjepa_ac.predictor import Predictor
 from vjepa_ac.schedule import make_scheduler
-from vjepa_ac.variations import MODELS, TRAININGS
+from vjepa_ac.variations import SEED, TRAINING, ModelConfig, TrainingConfig
 
 
-MODEL = "base"
+RAW_MODEL = ModelConfig(d_model=512, d_ff=2048, n_heads=16, n_layers=6)
+RAW_TRAINING = TrainingConfig(
+    lr=1e-4,
+    batch_size=64,
+    grad_accum=8,
+    T=16,
+    warmup_steps=300,
+    total_steps=3000,
+    val_interval=500,
+    val_windows=1024,
+    log_interval=100,
+    amp=True,
+)
 WINDOWS = 512
 STEPS = 3000
 WARMUP = 50
@@ -19,17 +29,10 @@ EVAL_EVERY = 500
 EVAL_WINDOWS = 256
 
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--stride", type=int, default=6)
-    p.add_argument("--seed", type=int, default=0)
-    return p.parse_args()
-
-
 def main():
-    args = parse_args()
-    mc = MODELS[MODEL]
-    tc = TRAININGS["full"]
+    mc = RAW_MODEL
+    tc = RAW_TRAINING
+    stride = TRAINING.stride
     device = get_device()
     device_type = device.split(":")[0]
     amp = tc.amp and device_type == "cuda"
@@ -37,21 +40,21 @@ def main():
     cache = data.load_cache()
     assert cache.state_dim == mc.d_action
     train_eps, _ = data.split_episodes(cache.episodes, tc.val_frac)
-    starts_all = data.window_starts(train_eps, tc.T, args.stride)
-    g = torch.Generator().manual_seed(args.seed)
+    starts_all = data.window_starts(train_eps, tc.T, stride)
+    g = torch.Generator().manual_seed(SEED)
     n_sub = min(WINDOWS, len(starts_all))
     sub = starts_all[torch.randperm(len(starts_all), generator=g)[:n_sub]]
     eval_starts = sub[: min(EVAL_WINDOWS, n_sub)]
-    cond = data.fit_conditioner(cache.states, train_eps, args.stride)
+    cond = data.fit_conditioner(cache.states, train_eps, stride)
     micro = max(1, tc.batch_size // tc.grad_accum)
     print(
-        f"{n_sub} fixed train windows | stride {args.stride} | {STEPS} steps | "
+        f"{n_sub} fixed train windows | stride {stride} | {STEPS} steps | "
         f"batch {tc.batch_size} (micro {micro}) | eval on {len(eval_starts)} windows | {device}"
     )
 
     def batch(z_starts, a_starts, model):
-        z, _ = data.gather(cache, cond, z_starts, tc.T, args.stride, device)
-        a = cond.windows(a_starts, tc.T, args.stride).to(device)
+        z, _ = data.gather(cache, cond, z_starts, tc.T, stride, device)
+        a = cond.windows(a_starts, tc.T, stride).to(device)
         with torch.autocast(device_type, dtype=torch.bfloat16, enabled=amp):
             pred = model(z, a)
         zhat = z + pred.float()
@@ -68,7 +71,7 @@ def main():
                 js = eval_starts[(torch.arange(i, i + len(zs)) + 1) % len(eval_starts)]
                 loss = batch(zs, js, model)
             else:
-                z, _ = data.gather(cache, cond, zs, tc.T, args.stride, device)
+                z, _ = data.gather(cache, cond, zs, tc.T, stride, device)
                 a = torch.zeros(len(zs), tc.T, cache.state_dim, device=device)
                 with torch.autocast(device_type, dtype=torch.bfloat16, enabled=amp):
                     pred = model(z, a)
@@ -79,7 +82,7 @@ def main():
 
     copy_tot = 0.0
     for i in range(0, len(eval_starts), micro):
-        z, _ = data.gather(cache, cond, eval_starts[i : i + micro], tc.T, args.stride, device)
+        z, _ = data.gather(cache, cond, eval_starts[i : i + micro], tc.T, stride, device)
         copy_tot += F.smooth_l1_loss(z[:, :-1], z[:, 1:]).item() * z.shape[0]
     copy_loss = copy_tot / len(eval_starts)
     print(f"copy baseline on eval windows: {copy_loss:.4f}\n")
@@ -87,13 +90,13 @@ def main():
     roll = torch.roll(torch.arange(n_sub), 1)
 
     def run_variant(name, shuffled):
-        torch.manual_seed(args.seed)
+        torch.manual_seed(SEED)
         model = Predictor(mc, tc.T).to(device)
         optim = torch.optim.AdamW(
             model.parameters(), lr=LR, betas=tc.betas, weight_decay=tc.weight_decay
         )
         sched = make_scheduler(optim, WARMUP, STEPS)
-        samp = torch.Generator().manual_seed(args.seed + 1)
+        samp = torch.Generator().manual_seed(SEED + 1)
         model.train()
         history = []
         for step in range(1, STEPS + 1):

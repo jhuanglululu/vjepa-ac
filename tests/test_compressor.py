@@ -2,7 +2,7 @@ import torch
 
 from vjepa_ac.compressor import Compressor, IDHead, ReconHead
 from vjepa_ac.cpredictor import CPredictor
-from vjepa_ac.variations import MODELS
+from vjepa_ac.variations import SMOKE_MODEL
 
 
 def test_compressor_shapes_flat_and_windowed():
@@ -25,7 +25,7 @@ def test_recon_head_shape():
 
 
 def test_cpredictor_encode_and_forward():
-    mc = MODELS["tiny-c"]
+    mc = SMOKE_MODEL
     model = CPredictor(mc, max_T=4)
     z = torch.randn(2, 4, mc.comp_patches, mc.comp_d_latent)
     tokens = model.encode(z)
@@ -35,7 +35,7 @@ def test_cpredictor_encode_and_forward():
 
 
 def test_cpredictor_stats_travel_in_state_dict():
-    mc = MODELS["tiny-c"]
+    mc = SMOKE_MODEL
     model = CPredictor(mc, max_T=4)
     model.set_stats(torch.full((mc.d_state,), 2.0), torch.full((mc.d_state,), 3.0))
     clone = CPredictor(mc, max_T=4)

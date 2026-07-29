@@ -1,7 +1,9 @@
 import torch
 
 from vjepa_ac.predictor import Predictor, block_causal_mask
-from vjepa_ac.variations import MODELS
+from vjepa_ac.variations import ModelConfig
+
+TINY = ModelConfig(d_state=32, patch_grid=4, d_model=64, d_ff=256, n_heads=4, n_layers=2)
 
 
 def test_block_causal_mask_exact():
@@ -20,7 +22,7 @@ def test_block_causal_mask_exact():
 
 
 def test_forward_shape():
-    cfg = MODELS["tiny"]
+    cfg = TINY
     model = Predictor(cfg, max_T=3)
     z = torch.randn(2, 3, cfg.n_patches, cfg.d_state)
     a = torch.randn(2, 3, cfg.d_action)
@@ -30,7 +32,7 @@ def test_forward_shape():
 
 def test_causality():
     torch.manual_seed(0)
-    cfg = MODELS["tiny"]
+    cfg = TINY
     model = Predictor(cfg, max_T=3).eval()
     z = torch.randn(1, 3, cfg.n_patches, cfg.d_state)
     a = torch.randn(1, 3, cfg.d_action)
