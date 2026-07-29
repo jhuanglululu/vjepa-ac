@@ -60,10 +60,11 @@ loss。
 
 - **Encoder：** `facebook/vjepa2-vitl-fpc64-256` 把 256x256 畫面轉成
   256 x 1024 patch 特徵。每幀只編碼一次並存入快取；encoder 不參與訓練。
-- **Compressor（約 7M）：** 16 個 learned query 從 256 個 patch 產生
+- **Compressor（約 3.4M，另有約 1.5M 的 inverse-dynamics head）：**
+  16 個 learned query 從 256 個 patch 產生
   16 x 384 token。Inverse-dynamics head 讓 token 保留動作，輕量 reconstruction
   loss 則保留場景資訊。
-- **Predictor（約 17M）：** 6 層 block-causal transformer，根據最多 16 幀及其
+- **Predictor（約 19M）：** 6 層 block-causal transformer，根據最多 16 幀及其
   動作預測下一組 token 的變化：`z[t+1] = z[t] + f(z[<=t], a[<=t])`。
 - **動作輸入（7 維）：** 前 6 維是加總並修正角度的機器人狀態變化；最後一維
   是夾爪的絕對狀態。正規化數值會與 checkpoint 一起保存。

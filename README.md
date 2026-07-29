@@ -69,10 +69,11 @@ Two other choices came from measurements:
 - **Encoder:** `facebook/vjepa2-vitl-fpc64-256` converts a 256x256 frame into
   256 x 1024 patch features. Frames are encoded once and cached; the encoder
   is not trained.
-- **Compressor (~7M parameters):** 16 learned queries attend to the 256 patches
+- **Compressor (~3.4M parameters, plus a ~1.5M inverse-dynamics head):**
+  16 learned queries attend to the 256 patches
   and produce 16 x 384 tokens. An inverse-dynamics head makes the tokens retain
   motion; a light reconstruction loss preserves scene information.
-- **Predictor (~17M parameters):** a 6-layer block-causal transformer predicts
+- **Predictor (~19M parameters):** a 6-layer block-causal transformer predicts
   the next token change from up to 16 frames and their actions:
   `z[t+1] = z[t] + f(z[<=t], a[<=t])`.
 - **Action input (7 values):** summed, angle-corrected state change for robot
