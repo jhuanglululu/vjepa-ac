@@ -156,15 +156,17 @@ and per-script knobs at the top of each script. The only flags are
 Run the scripts in this order:
 
 ```bash
-# 1. Download the first 100 episodes and cache V-JEPA features for each camera
+# 1. Download the first 100 episodes and cache V-JEPA features for the chosen
+#    camera (the CAMERA constant at the top; ext1 lands in latent_cache/)
 uv run scripts/prepare_cache.py
 
 # 2. Confirm action/state meanings
 uv run scripts/check_actions.py
 
-# 3. Screen every camera and stride (1 seed each), then confirm the chosen
-#    camera at strides 4 and 6 with 3 seeds
-uv run scripts/gate_sweep.py
+# 3. Screen cameras and strides (1 seed each), then confirm the chosen camera
+#    at strides 4 and 6 with 3 seeds. Sweeping ext2/wrist first needs their
+#    caches: rerun prepare_cache.py with CAMERA changed
+uv run scripts/gate_sweep.py --cameras ext1
 uv run scripts/stride_gate.py
 
 # 4. Confirm that raw features have little action-predictable change
@@ -204,8 +206,8 @@ survives only inside `overfit_check.py`.
 Main outputs:
 
 - `latent_cache/`: cached features, state, actions, and episode ranges for the
-  chosen camera (ext1); the other cameras from the sweep go to
-  `latent_cache/ext2/` and `latent_cache/wrist/`.
+  chosen camera (ext1); rebuilding with a different `CAMERA` writes to
+  `latent_cache/ext2/` or `latent_cache/wrist/` instead.
 - `checkpoints/`: `compressor.safetensors` from stage 1 and the predictor's
   `current.safetensors` with its `current.json` sidecar (config, conditioning
   stats, latest validation loss), overwritten at every validation. Evaluation

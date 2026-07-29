@@ -17,6 +17,7 @@ from vjepa_ac import data
 from vjepa_ac.device import get_device, pick_free_gpus
 from vjepa_ac.variations import TRAINING
 
+CAMERA = data.CAMERA
 FPS = 15
 DECODE_BATCH = 32
 EPISODES = 100
@@ -40,13 +41,18 @@ def load_plan(n_episodes, trim):
         if length - trim < 2:
             dropped += 1
             continue
-        ep = {"episode": meta["episode_index"][i], "length": length, "videos": {}}
-        for short, key in data.CAMERAS.items():
-            ep["videos"][short] = {
-                "chunk": meta[f"videos/{key}/chunk_index"][i],
-                "file": meta[f"videos/{key}/file_index"][i],
-                "from_ts": meta[f"videos/{key}/from_timestamp"][i],
-            }
+        key = data.CAMERAS[CAMERA]
+        ep = {
+            "episode": meta["episode_index"][i],
+            "length": length,
+            "videos": {
+                CAMERA: {
+                    "chunk": meta[f"videos/{key}/chunk_index"][i],
+                    "file": meta[f"videos/{key}/file_index"][i],
+                    "from_ts": meta[f"videos/{key}/from_timestamp"][i],
+                }
+            },
+        }
         plan.append(ep)
     return plan, dropped
 
@@ -311,11 +317,9 @@ if __name__ == "__main__":
     stds = [torch.tensor(processor.image_std, device=dev).view(1, 3, 1, 1) for dev in enc_devices]
     del m, base_enc
 
-    healthy = True
-    for short in data.CAMERAS:
-        healthy &= build_camera_cache(short, plan, rows, TRIM, encoders, enc_devices, means, stds)
+    healthy = build_camera_cache(CAMERA, plan, rows, TRIM, encoders, enc_devices, means, stds)
     print(
-        "now run: uv run scripts/gate_sweep.py"
+        "now run: uv run scripts/check_actions.py"
         if healthy
         else "fix the cache before running the gate"
     )

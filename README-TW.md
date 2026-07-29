@@ -136,15 +136,17 @@ uv run scripts/plan_demo.py      # 使用同一份 checkpoint 與快取
 請依序執行：
 
 ```bash
-# 1. 下載前 100 段資料，並建立各相機的 V-JEPA 特徵快取
+# 1. 下載前 100 段資料，並建立選定相機的 V-JEPA 特徵快取
+#    （腳本頂端的 CAMERA 常數；ext1 直接存於 latent_cache/）
 uv run scripts/prepare_cache.py
 
 # 2. 確認動作與狀態的意義
 uv run scripts/check_actions.py
 
-# 3. 先掃描所有相機與 stride（各 1 個 seed），再以 3 個 seed
-#    確認選定相機在 stride 4 與 6 的表現
-uv run scripts/gate_sweep.py
+# 3. 先掃描相機與 stride（各 1 個 seed），再以 3 個 seed 確認選定相機在
+#    stride 4 與 6 的表現。要先掃描 ext2/wrist，需改 CAMERA 重跑
+#    prepare_cache.py 建立其快取
+uv run scripts/gate_sweep.py --cameras ext1
 uv run scripts/stride_gate.py
 
 # 4. 確認動作幾乎無法直接預測原始特徵變化
@@ -181,7 +183,7 @@ uv run scripts/plan_demo.py
 主要輸出：
 
 - `latent_cache/`：選定相機（ext1）的快取特徵、狀態、動作與操作片段範圍；
-  掃描用的其他相機存於 `latent_cache/ext2/` 與 `latent_cache/wrist/`。
+  改用其他 `CAMERA` 重建時會寫入 `latent_cache/ext2/` 或 `latent_cache/wrist/`。
 - `checkpoints/`：第一階段的 `compressor.safetensors`，以及 predictor 的
   `current.safetensors` 與其 `current.json` sidecar（設定、conditioning 統計
   與最新驗證 loss），每次驗證時覆寫。Evaluation 和 planning 載入這組檔案。
